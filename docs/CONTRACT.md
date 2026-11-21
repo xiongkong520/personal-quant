@@ -175,3 +175,109 @@ python -m quant.cli export  --target cloudflare
 - 模拟盘：T+1、涨跌停拒单、费用、滑点各有单测（构造极端行情）。
 - Cloudflare：`wrangler dev --local` 起得来，`/api/health`、`/api/signals` 返回契约 JSON；D1 本地模式建表成功。
 - 全链路：fetch → train → backtest → paper → serve 能按顺序跑通（`scripts/smoke.sh`）。
+
+## 9. 模块入口签名（CLI 按这些调用，实现方不得改名）
+
+```python
+# quant.data.store
+init_db(db_path: Path) -> None
+upsert_daily(df: pd.DataFrame, db_path: Path) -> int
+upsert_minute(df: pd.DataFrame, db_path: Path) -> int
+read_daily(symbol: str, db_path: Path, start: str|None = None, end: str|None = None) -> pd.DataFrame
+read_daily_multi(symbols: list[str], db_path: Path, start: str|None = None, end: str|None = None) -> pd.DataFrame
+write_signal(sig: dict, db_path: Path) -> None
+read_signals(db_path: Path, limit: int = 200) -> list[dict]
+read_latest_signals(db_path: Path, symbols: list[str]) -> list[dict]
+
+# quant.data.calendar
+trade_days(start: str, end: str, cfg: dict) -> list[str]     # 本地缓存 + AKShare 兜底
+
+# quant.data.fetch
+sync_daily(symbols: list[str], start: str, end: str, cfg: dict) -> dict[str, int]
+sync_minute(symbols: list[str], period: int, cfg: dict) -> dict[str, int]
+
+# quant.features.builder
+build_features(daily: pd.DataFrame, horizon_days: int = 1, label_threshold: float = 0.005) -> pd.DataFrame
+# 返回列：trade_date + 特征列（float）+ "label"（up/flat/down）；特征列名写入 model.json
+
+# quant.model.train
+train(symbols: list[str], cfg: dict) -> dict          # 训练并写 data/models/model.json，返回 metrics
+
+# quant.model.predict
+load_model(path: Path) -> dict
+predict_proba(model: dict, x: dict[str, float]) -> dict   # {"up":p,"flat":p,"down":p}
+generate_signal(symbol: str, cfg: dict) -> dict            # 契约 §4 JSON；status 按数据情况
+infer_signal(model: dict, daily: pd.DataFrame) -> dict | None   # 供 Cloudflare 镜像测试对照
+
+# quant.backtest.engine
+run_backtest(start: str, end: str, cfg: dict) -> dict       # 写 report.md，返回指标 dict
+
+# quant.paper.rules（回测与模拟盘共用）
+limit_pct(symbol: str, is_st: bool = False) -> float
+limit_prices(pre_close: float, symbol: str, is_st: bool = False) -> tuple[float, float]
+fees(side: str, amount: float, cfg: dict) -> dict           # {"commission","stamp_tax","transfer_fee","total"}
+
+# quant.paper.engine
+init_account(cash: float, db_path: Path) -> None
+advance(days: int, cfg: dict) -> dict                       # 推进模拟盘，返回快照
+snapshot(cfg: dict) -> dict                                 # 账户/持仓/净值
+
+# quant.api.server
+create_app(cfg: dict) -> FastAPI
+run(port: int, cfg: dict) -> None
+
+# quant.export_cloud（Lead 负责）
+export_to_cloudflare(cfg: dict) -> dict
+```
+
+Worker 端点（cloud-dev 实现）：`GET /api/health`、`GET /api/signals`、`POST /api/ingest`、`GET /api/stream`（SSE）。
+D1 表 `signals` 字段与契约 §3.3 一致（少 paper_* 内部字段）。
+
+## 10. 双端推理测试
+
+`tests/test_model_export.py`（Lead 写，model-dev 与 cloud-dev 各保证自己一侧）：
+用固定 fixture 特征向量，断言 Python `predict_proba` 与 Worker 内 TS 推理结果差 < 1e-6（TS 侧由 cloud-dev 提供 `cloudflare/worker/test/parity.mjs`，`node` 直跑）。
+
+## 11. AKShare 1.20.x 接口映射（2026-11-21 实测，data-dev 必读）
+
+| 用途 | 调用 | 返回列 | 转换要点 |
+|---|---|---|---|
+| 交易日历 | `ak.calendar_trade_date_hist_sina()` | `trade_date`(date) | 转 `YYYY-MM-DD` list，缓存 `data/raw/trade_calendar.csv` |
+| 日线 | `ak.stock_zh_a_hist_em(symbol="600519", period="daily", start_date="20250101", end_date="20261120", adjust="qfq")` | 日期/开盘/收盘/最高/最低/成交量/成交额/振幅/涨跌幅/涨跌额/换手率/股票代码 | **成交量单位=手 → ×100 转股**；`pre_close = 收盘 - 涨跌额`；`close` 为不复权 → 需再拉一次 `adjust=""` 并 merge（qfq 列的"收盘"即 `adj_close`） |
+| 分钟线 | `ak.stock_zh_a_hist_min_em(symbol="600519", period="5", start_date="2026-11-10 09:30:00", end_date="2026-11-20 15:00:00", adjust="")` | 时间/开盘/收盘/最高/最低/成交量/成交额/均价 | 成交量手→股；时间转 `YYYY-MM-DD HH:MM` |
+| 实时快照 | `ak.stock_zh_a_spot_em()` | 全市场表 | 只取所需 symbol 行；非交易时段返回最新收盘 |
+| 五档盘口 | `ak.stock_bid_ask_em(symbol="600519")` | 卖5~买5 | 可选，用于生成额外特征 |
+
+注意：
+- 旧名 `tool_trade_date_hist_sina`、`stock_zh_a_hist` 在 1.20.4x 已更名，**不要用旧名**。
+- 限流：东财接口无 key 但高频会被限；采集间隔 ≥0.3s，失败重试 2 次退避，写库幂等。
+- 日线一次可拉数年；拉全量分 symbol 循环，单 symbol 失败不中断整体。
+
+## 12. 历史回测 + 胜率口径（`run_backtest` 必须全部输出，缺一项视为未完成）
+
+输出两份：`data/reports/backtest.md`（人读）+ `data/reports/backtest.json`（机读，字段如下）。
+
+### 12.1 方向判断指标（预测质量）
+- `accuracy`：三分类总体准确率；`n`、`coverage`（有信号样本占比）
+- 分方向：`up` / `flat` / `down` 各自的 precision、recall、F1
+- `logloss`、`brier`（三分类 multiclass Brier）
+- `confusion`：3×3 混淆矩阵
+- 按置信度分桶实际命中率：≤0.4 / 0.4–0.5 / 0.5–0.6 / >0.6，每桶给 n 与 hit_rate → 校准曲线
+- 分年度 / 分季度准确率（稳定性），标出样本量
+
+### 12.2 胜率（交易口径，必须与方向准确率分开命名）
+- `win_rate`：平仓盈利次数 / 平仓次数；同时给 `win_rate_by_direction`（long/short/flat 不参与）
+- `trades`：总笔数、盈利笔数、亏损笔数、平局
+- `avg_return_per_trade`、`payoff_ratio`（平均盈利/平均亏损）
+- `max_drawdown`、`sharpe`（日频年化，无风险利率按 0）、`total_return`
+- 胜率 95% **Wilson 置信区间**（样本 < 30 时必须标注"样本不足，仅供参考"）
+- `equity_curve`：日期 + 净值数组（供前端画图）
+
+### 12.3 基准对比（必须并列）
+- `always_flat`（全预测走平）、`majority`（训练窗多数类）、`ma5_cross`（5 日线交叉策略）、`random`
+- 每项给准确率/胜率/收益，报告里明确"相对基准提升了多少、是否在置信区间外"
+
+### 12.4 walk-forward 规则
+- 按时间滚动切分：训练窗 ≥ 1 年，测试窗 1 季度，`walk_forward_splits` 见配置；严禁用测试期数据训练或调参
+- 报告开头写明：数据区间、symbol 列表、样本量、切分方式、模型版本、随机种子
+- `metrics` 同时写入 `model.json` 的 `metrics` 字段（§5）
