@@ -170,8 +170,9 @@ async function handleHealth(env: Env): Promise<Response> {
         endpoint: "POST /api/ingest",
       },
       security: {
-        ua_filter: true,
-        accept_check: true,
+        ua_filter: false,
+        accept_check: false,
+        note: "UA/Accept 黑名单已取消（用户要求），反爬交由 Turnstile 人机验证与边缘 WAF（需自定义域名）",
         same_origin_cors: true,
         rate_limit_per_min: readRateLimitPerMin(env),
         rate_limit_backend: env.RATE_LIMIT_KV ? "kv" : "memory",
@@ -591,9 +592,12 @@ function handlePreflight(request: Request): Response {
 
 /**
  * 安全门（在路由前执行）：
- *   1) 机器接口 POST /api/ingest 只认 token，不受 UA/Accept 反爬限制；
- *   2) 其余路径：UA 黑名单 -> 403；Accept 缺失/异常 -> 403；跨域 Origin -> 403；
- *   3) 限流（按 IP 每分钟 N 次）-> 429 + Retry-After。
+ *   1) 机器接口 POST /api/ingest 只认 token，不受人机验证限制；
+ *   2) 人机验证：/api/signals、/api/stream、/api/model 需要 quant_pass cookie
+ *      （Turnstile siteverify 通过后签发）；未验证返回 401 + challenge:true；
+ *   3) 限流（按 IP 每分钟 N 次，默认 120）-> 429 + Retry-After。
+ * 注：UA/Accept 黑名单已按用户要求取消（不误伤正常浏览器），
+ *     边缘防护请在「自定义域名 + Cloudflare 免费套餐 WAF/Bot Fight Mode」层配置。
  */
 async function securityGate(request: Request, env: Env, path: string): Promise<Response | null> {
   const isMachineIngest = path === "/api/ingest" && request.method === "POST";

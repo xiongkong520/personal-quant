@@ -22,7 +22,7 @@ export const TURNSTILE_SITEVERIFY_URL = "https://challenges.cloudflare.com/turns
 
 export const COOKIE_NAME = "quant_pass";
 export const COOKIE_TTL_SECONDS = 3600;
-export const DEFAULT_RATE_LIMIT_PER_MIN = 60;
+export const DEFAULT_RATE_LIMIT_PER_MIN = 120;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
 /**
@@ -103,25 +103,18 @@ export interface ClientCheck {
   reason?: string;
 }
 
-/** UA 黑名单检查。curl / 无头浏览器 / 抓取库 / 空 UA 一律 403。 */
+/**
+ * UA 检查：**已按用户要求取消黑名单拦截**（原 curl/无头浏览器/抓取库黑名单不再生效）。
+ * 反爬/防机器人改由 Cloudflare 边缘防护（自定义域名后的免费 WAF/Bot Fight Mode）
+ * 与 Turnstile 人机验证负责；这里只保留 UA 记录用于日志。
+ */
 export function checkUserAgent(request: Request): ClientCheck {
   const ua = (request.headers.get("user-agent") ?? "").trim();
-  if (ua === "") return { ok: false, error: "forbidden_client", reason: "missing_user_agent", message: "缺少 User-Agent" };
-  const hit = UA_BLACKLIST.find((pattern) => pattern.test(ua));
-  if (hit) {
-    return { ok: false, error: "forbidden_client", reason: "blacklisted_user_agent", message: `User-Agent 被拒绝：${ua.slice(0, 80)}`, userAgent: ua.slice(0, 80) };
-  }
   return { ok: true, userAgent: ua };
 }
 
-/** Accept 头检查：浏览器导航 / fetch / SSE 都要带可识别的 Accept，缺失或明显异常拒绝。 */
-export function checkAcceptHeader(request: Request): ClientCheck {
-  const accept = (request.headers.get("accept") ?? "").trim().toLowerCase();
-  if (accept === "") return { ok: false, error: "bad_accept", reason: "missing_accept", message: "缺少 Accept 头" };
-  const allowed = ["text/html", "application/xhtml+xml", "application/json", "text/event-stream", "text/plain", "*/*"];
-  if (!allowed.some((item) => accept.includes(item))) {
-    return { ok: false, error: "bad_accept", reason: "unsupported_accept", message: `不接受的 Accept：${accept.slice(0, 120)}` };
-  }
+/** Accept 检查：已放宽（原 Accept 白名单校验取消），避免误伤正常浏览器/降级请求。 */
+export function checkAcceptHeader(_request: Request): ClientCheck {
   return { ok: true };
 }
 

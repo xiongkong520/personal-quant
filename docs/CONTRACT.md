@@ -241,7 +241,7 @@ Worker 端点（cloud-dev 实现）：
 - `POST /api/ingest`：本地推送，`x-ingest-token` 鉴权（或 Authorization Bearer）
 - `GET /`：静态看板（Pages assets）
 
-安全层（`src/security.ts`）：UA 黑名单（403）、Accept 校验、同源 CORS、按 `cf-connecting-ip` 限流 60/min（429 + Retry-After）、CSP / X-Frame-Options / Referrer-Policy 等安全头。
+安全层（`src/security.ts`）：**UA/Accept 白名单已取消**（用户 2026-11-21 要求，避免误伤浏览器）；保留同源 CORS、按 `cf-connecting-ip` 限流 120/min（429 + Retry-After）、CSP / X-Frame-Options / Referrer-Policy 等安全头；反爬由 Turnstile 人机验证与自定义域名后的 Cloudflare 免费 WAF 承担（见 docs/SECURITY.md）。
 D1 表 `signals` 字段与契约 §3.3 一致（少 paper_* 内部字段）。
 
 ## 10. 双端推理测试
