@@ -1050,6 +1050,15 @@
   }
 
   function signalEmptyConf() {
+    if (state.dev && !IS_CLOUD) {
+      return {
+        title: "静态预览 · 未连接 API",
+        message: "当前没有 /api/signals 服务（纯静态预览会以开发模式降级）。",
+        command: "python -m quant.cli serve --port 8787",
+        note: "启动本地 API 后刷新页面即可看到真实信号与指标。",
+        icon: "i-warning"
+      };
+    }
     if (IS_CLOUD) {
       return {
         title: "等待云端信号",
@@ -1618,6 +1627,14 @@
           note: "运行后查看本地看板 http://127.0.0.1:8787/。",
           icon: "i-chart"
         };
+      } else if (!conf.message && state.dev) {
+        conf = {
+          title: "静态预览 · 未连接本地 API",
+          message: "纯静态预览没有回测报告；启动本地 API 后读取 data/reports/backtest.json。",
+          command: "python -m quant.cli serve --port 8787",
+          note: "或先运行 python -m quant.cli backtest 生成报告。",
+          icon: "i-chart"
+        };
       } else if (!conf.message) {
         conf = {
           title: "未回测",
@@ -1733,7 +1750,13 @@
     if (!paper) {
       if (content) content.hidden = true;
       show(empty, true);
-      renderInto(empty, IS_CLOUD ? {
+      renderInto(empty, state.dev && !IS_CLOUD ? {
+        title: "静态预览 · 未连接本地 API",
+        message: "纯静态预览没有模拟盘快照；启动本地 API 后可见现金、持仓与胜率。",
+        command: "python -m quant.cli serve --port 8787",
+        note: "本地看板：http://127.0.0.1:8787/",
+        icon: "i-warning"
+      } : IS_CLOUD ? {
         title: "云端不提供模拟盘",
         message: "Worker 只存信号，模拟盘账户与净值在本地 FastAPI 看板。",
         command: "python -m quant.cli serve --port 8787",
@@ -1843,7 +1866,12 @@
       if (tbody) tbody.replaceChildren();
       if (wrap) wrap.hidden = true;
       show(empty, true);
-      renderInto(empty, IS_CLOUD ? {
+      renderInto(empty, state.dev && !IS_CLOUD ? {
+        title: "静态预览 · 未连接本地 API",
+        message: "纯静态预览没有订单记录。",
+        command: "python -m quant.cli serve --port 8787",
+        icon: "i-warning"
+      } : IS_CLOUD ? {
         title: "云端不提供订单",
         message: "模拟成交记录只保存在本地 SQLite。",
         icon: "i-warning"
@@ -2004,7 +2032,12 @@
       if (state.rendered.equity === "empty") return;
       state.rendered.equity = "empty";
       wrap.dataset.built = "";
-      var empty = IS_CLOUD ? {
+      var empty = state.dev && !IS_CLOUD ? {
+        title: "静态预览 · 未连接本地 API",
+        message: "纯静态预览没有净值数据；启动本地 API 并推进模拟盘后显示曲线。",
+        command: "python -m quant.cli serve --port 8787",
+        icon: "i-chart"
+      } : IS_CLOUD ? {
         title: "云端不提供净值曲线",
         message: "净值来自本地模拟盘，Worker 只存信号。",
         icon: "i-chart"
@@ -2156,7 +2189,10 @@
         if (!state.signals.length) { renderSignalCard(); renderSignalTable(); }
         return { kind: "ratelimit" };
       }
-      if (r.error) return { kind: "error", error: r.error };
+      if (r.error) {
+        if (!state.signals.length) { renderSignalCard(); renderSignalTable(); }
+        return { kind: "error", error: r.error };
+      }
       var incoming = extractSignals(r.data).map(normSignal).filter(Boolean);
       /* 全量 GET：以服务端为准（空库时清空旧数据）；SSE 增量才做 merge */
       state.signals = incoming.length ? incoming : [];
@@ -2180,7 +2216,7 @@
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
       if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
       if (r.error) {
-        if (r.error.status === 404) { state.paper = null; renderPaper(); return { kind: "empty" }; }
+        if (r.error.status === 404 || !state.paper) { state.paper = null; renderPaper(); return { kind: r.error.status === 404 ? "empty" : "error" }; }
         return { kind: "error", error: r.error };
       }
       state.paper = normPaper(r.data);
@@ -2196,7 +2232,7 @@
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
       if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
       if (r.error) {
-        if (r.error.status === 404) { state.equity = []; renderEquity(); return { kind: "empty" }; }
+        if (r.error.status === 404 || !state.equity.length) { state.equity = []; renderEquity(); return { kind: r.error.status === 404 ? "empty" : "error" }; }
         return { kind: "error", error: r.error };
       }
       var points = normEquity(r.data);
@@ -2213,6 +2249,11 @@
       if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
       if (r.error) {
         state.backtest = null;
+        if (r.error.status === 404 && state.dev) {
+          state.backtestError = null;
+          renderBacktest();
+          return { kind: "empty" };
+        }
         if (r.error.status === 404) {
           var data = r.error.data || {};
           var msg = String(data.message || "尚未生成回测报告。");
@@ -2524,7 +2565,14 @@
     if (B["foot.mode"]) setText(B["foot.mode"], IS_CLOUD ? "CLOUDFLARE PAGES" : "LOCAL");
     if (B["foot.gate"]) setText(B["foot.gate"], "人机验证检测中");
 
-    void detectGate();
+    void detectGate().then(function () {
+      if (!state.dev) return;
+      renderSignalCard();
+      renderSignalTable();
+      renderPaper();
+      renderEquity();
+      renderBacktest();
+    });
     void refreshAll("boot").then(function () {
       if (IS_CLOUD) startStream();
       else startPolling();

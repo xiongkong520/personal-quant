@@ -78,6 +78,7 @@
 ## 4. 技术约束
 
 - 纯 HTML + CSS + JS，**无构建、无 CDN、无第三方库**；文件：`index.html` / `styles.css` / `app.js`。
+- **唯一例外**：Cloudflare Turnstile 官方脚本 `https://challenges.cloudflare.com/turnstile/v0/api.js`，仅在收到人机验证挑战（401 `{"challenge":true}`）时懒加载；除此之外无任何在线字体 / 图标 / CDN。
 - 图表用 SVG 或 Canvas 手写；不引 Chart.js/ECharts（体积 + CDN 依赖）。
 - 数据源：本地 `GET /api/signals`、`/api/paper`、`/api/equity`；Cloudflare `GET /api/signals` + `GET /api/stream`（SSE）。
 - 可访问性：对比度 ≥ 4.5:1，focus-visible 样式，SSE 更新用 `aria-live="polite"`。
