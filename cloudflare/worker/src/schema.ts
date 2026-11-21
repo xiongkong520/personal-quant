@@ -1,0 +1,52 @@
+/**
+ * D1 schema（契约 §3.3 signals 表）。
+ * 与 worker/schema.sql / migrations/0001_create_signals.sql 保持一致；
+ * `node scripts/check-schema.mjs` 会在测试里校验三者同步，避免改一处忘另一处。
+ */
+export const SCHEMA_STATEMENTS: string[] = [
+  `CREATE TABLE IF NOT EXISTS signals (
+  signal_id     TEXT PRIMARY KEY,
+  symbol        TEXT NOT NULL,
+  asof          TEXT NOT NULL,
+  trade_date    TEXT NOT NULL,
+  price         REAL NOT NULL,
+  direction     TEXT NOT NULL CHECK (direction IN ('up', 'flat', 'down')),
+  prob_up       REAL NOT NULL,
+  prob_flat     REAL NOT NULL,
+  prob_down     REAL NOT NULL,
+  confidence    REAL NOT NULL,
+  horizon       TEXT NOT NULL DEFAULT '1d',
+  expires_at    TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  top_features  TEXT NOT NULL DEFAULT '[]',
+  source        TEXT NOT NULL DEFAULT 'local' CHECK (source IN ('local', 'cloud')),
+  status        TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'stale', 'warming_up')),
+  created_at    TEXT NOT NULL
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_signals_symbol_asof ON signals (symbol, asof DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_signals_trade_date ON signals (trade_date DESC)`,
+];
+
+export const SCHEMA_SQL = `${SCHEMA_STATEMENTS.join(";\n\n")};\n`;
+
+/** signals 表字段（契约 §3.3），供测试与文档引用。 */
+export const SIGNALS_COLUMNS = [
+  "signal_id",
+  "symbol",
+  "asof",
+  "trade_date",
+  "price",
+  "direction",
+  "prob_up",
+  "prob_flat",
+  "prob_down",
+  "confidence",
+  "horizon",
+  "expires_at",
+  "model_version",
+  "top_features",
+  "source",
+  "status",
+  "created_at",
+] as const;

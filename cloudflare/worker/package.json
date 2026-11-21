@@ -1,0 +1,32 @@
+{
+  "name": "personal-quant-cloudflare-worker",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "个人量化工作台 · Cloudflare Worker + D1 + Pages 实时信号服务（含反爬/限流/Turnstile）",
+  "scripts": {
+    "bundle:check": "node scripts/check-bundle.mjs",
+    "check": "node test/parity.mjs && node scripts/check-schema.mjs && node scripts/check-bundle.mjs",
+    "db:init": "wrangler d1 execute personal_quant --local --file=schema.sql",
+    "db:init:remote": "wrangler d1 execute personal_quant --remote --file=schema.sql",
+    "db:migrate:local": "wrangler d1 migrations apply personal_quant --local",
+    "db:migrate:remote": "wrangler d1 migrations apply personal_quant --remote",
+    "db:seed:local": "wrangler d1 execute personal_quant --local --file=seed.sql",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --local --port 8788",
+    "dev:8788": "wrangler dev --local --ip 127.0.0.1 --port 8788",
+    "dev:node": "node scripts/dev-server.mjs",
+    "dev:remote": "wrangler dev --remote",
+    "parity": "node test/parity.mjs",
+    "security-test": "bash scripts/security-test.sh",
+    "smoke": "bash scripts/smoke.sh",
+    "sync-model": "node scripts/sync-model.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261119.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.7.2",
+    "wrangler": "4.166.0"
+  }
+}

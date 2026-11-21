@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="zh-CN" data-mode="cloud">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<meta name="theme-color" content="#0B0E13" />
+<meta name="robots" content="noindex, nofollow" />
+<title>个人量化工作台 · 云端实时</title>
+<link rel="stylesheet" href="styles.css" />
+<script>window.QT_MODE = "cloud";</script>
+</head>
+<body>
+
+<!-- 内联 SVG 图标（无在线字体/图标库，断网可用） -->
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.2 6.4A5.5 5.5 0 1 0 13.4 9"/><path d="M13.4 2.9v3.6H9.8"/></symbol>
+  <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.1"/><path d="M8 7.3v3.5M8 5.1v.1"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.1"/><path d="M8 4.6V8l2.3 1.5"/></symbol>
+  <symbol id="i-arrow-up" viewBox="0 0 16 16"><path d="M8 12.6V3.9M4.3 7.3 8 3.6l3.7 3.7"/></symbol>
+  <symbol id="i-arrow-down" viewBox="0 0 16 16"><path d="M8 3.4v8.7M4.3 8.7 8 12.4l3.7-3.7"/></symbol>
+  <symbol id="i-dash" viewBox="0 0 16 16"><path d="M3.4 8h9.2"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 16 16"><path d="M2.4 13.4h11.2M3.4 10.6l3.1-3.2 2.5 2.1 3.6-4.6"/></symbol>
+  <symbol id="i-db" viewBox="0 0 16 16"><ellipse cx="8" cy="4.1" rx="4.7" ry="1.8"/><path d="M3.3 4.1v7.7c0 1 2.1 1.8 4.7 1.8s4.7-.8 4.7-1.8V4.1M3.3 7.9c0 1 2.1 1.8 4.7 1.8s4.7-.8 4.7-1.8"/></symbol>
+  <symbol id="i-warning" viewBox="0 0 16 16"><path d="M8 2.7 14.1 13H1.9z"/><path d="M8 6.3v3M8 11.2v.1"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 16 16"><rect x="3.2" y="7" width="9.6" height="6.4" rx="1.2"/><path d="M5.6 7V5.5a2.4 2.4 0 0 1 4.8 0V7"/></symbol>
+</svg>
+
+<a class="skip-link" href="#main">跳到主内容</a>
+
+<div class="top-stack">
+  <div class="connbar" id="connBar" data-state="connecting" aria-hidden="true"><i></i></div>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="1.6" y="1.6" width="20.8" height="20.8" rx="5" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".32"/>
+        <path d="M6.2 16.6v-4.9M9.7 16.6V8.1M13.2 16.6v-3.5M16.7 16.6V6.2M20.2 16.6v-2.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <span class="brand-text">
+        <span class="brand-name">个人量化工作台</span>
+        <span class="brand-sub">A-SHARE · PAPER DESK · EDGE</span>
+      </span>
+    </div>
+    <div class="topbar-mid">
+      <span class="session" id="session" data-state="closed"><i class="dot"></i><span data-bind="status.phase">休市</span></span>
+      <span class="sep" aria-hidden="true"></span>
+      <span class="status-text"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><span data-bind="status.asof">最后更新 —</span></span>
+      <span class="chip" data-bind="status.model">model —</span>
+    </div>
+    <div class="topbar-actions">
+      <span class="tag tag-dev" id="devTag" hidden>开发模式</span>
+      <span class="conn" id="connState" data-state="connecting" aria-live="polite"><i class="dot"></i><span data-bind="conn.text">连接中</span></span>
+      <button class="btn btn-icon" id="refreshBtn" type="button" title="立即刷新" aria-label="立即刷新"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+      <button class="btn" id="disclaimerBtn" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><span class="btn-label">免责声明</span></button>
+    </div>
+  </header>
+  <div class="notice" id="notice" hidden role="status">
+    <svg class="icon" aria-hidden="true"><use href="#i-warning"/></svg>
+    <span class="notice-text" data-bind="notice.text">请求过于频繁，稍后重试</span>
+    <b class="notice-count num" id="noticeCount">30s</b>
+    <button class="linklike notice-retry" id="noticeRetry" type="button">立即重试</button>
+  </div>
+</div>
+
+<main class="app" id="main">
+
+  <!-- 01 方向信号 ------------------------------------------------------ -->
+  <section class="card span-12" style="--i:0" aria-labelledby="signalTitle">
+    <header class="card-head">
+      <h2 class="card-title" id="signalTitle"><span class="idx">01</span>方向信号<span class="card-sub">T+1 · 最新</span></h2>
+      <div class="card-meta">
+        <span data-bind="signal.meta">model —</span>
+        <span class="meta-sep" aria-hidden="true"></span>
+        <span data-bind="signal.tradeDate">—</span>
+      </div>
+    </header>
+    <div class="signal-grid" id="signalBody">
+      <div class="sig-col sig-main">
+        <div class="sig-tabs" id="sigTabs" role="tablist" aria-label="选择标的"></div>
+        <div class="sig-dir-line">
+          <div class="lamp" id="sigLamp" data-dir="flat" aria-hidden="true"><i class="dot"></i></div>
+          <div class="sig-dir-block">
+            <div class="sig-dir" id="sigDirWord" data-dir="flat">—</div>
+            <div class="sig-tags" id="sigStatusTag"></div>
+          </div>
+          <div class="sig-price-block">
+            <div class="sig-price num" id="sigPrice">—</div>
+            <div class="sig-price-meta" id="sigPriceMeta">—</div>
+          </div>
+        </div>
+        <div class="sig-kv">
+          <div><span>预测周期</span><b data-bind="sig.horizon">1d</b></div>
+          <div><span>有效期至</span><b data-bind="sig.expires">—</b></div>
+          <div><span>数据来源</span><b data-bind="sig.source">—</b></div>
+        </div>
+      </div>
+
+      <div class="sig-col sig-prob">
+        <div class="col-head"><span>方向概率</span><span class="col-meta">softmax · p(up, flat, down)</span></div>
+        <div class="prob-bar" id="probBar" role="img" aria-label="方向概率分布">
+          <i class="seg seg-up" data-seg="up"></i>
+          <i class="seg seg-flat" data-seg="flat"></i>
+          <i class="seg seg-down" data-seg="down"></i>
+        </div>
+        <div class="prob-legend">
+          <div class="prob-item" data-key="up"><span class="k"><i class="dot"></i>看涨</span><b class="num" id="probUp">—</b></div>
+          <div class="prob-item" data-key="flat"><span class="k"><i class="dot"></i>震荡</span><b class="num" id="probFlat">—</b></div>
+          <div class="prob-item" data-key="down"><span class="k"><i class="dot"></i>看跌</span><b class="num" id="probDown">—</b></div>
+        </div>
+        <div class="conf-block">
+          <div class="conf-head">
+            <span>置信度</span>
+            <span class="tag tag-warn" id="confLow" hidden>低置信</span>
+            <b class="num" id="confValue">—</b>
+          </div>
+          <div class="conf-bar" id="confBar"><i></i></div>
+          <div class="conf-note">取三类概率最大值；低于 40% 视为低置信</div>
+        </div>
+      </div>
+
+      <div class="sig-col sig-feat">
+        <div class="col-head"><span>特征贡献</span><span class="col-meta">top 5 · sort |contrib|</span></div>
+        <div class="feat-list" data-list="features" id="featList"></div>
+      </div>
+    </div>
+    <footer class="card-foot">
+      <span data-bind="signal.foot">—</span>
+      <span class="foot-right">概率为模型输出，非收益承诺</span>
+    </footer>
+    <div class="card-empty" id="signalEmpty" hidden></div>
+  </section>
+
+  <!-- 02 回测 ---------------------------------------------------------- -->
+  <section class="card span-12" style="--i:1" aria-labelledby="btTitle">
+    <header class="card-head">
+      <h2 class="card-title" id="btTitle"><span class="idx">02</span>回测 · walk-forward<span class="card-sub">方向口径 / 交易口径</span></h2>
+      <div class="card-meta">
+        <span data-bind="bt.meta">—</span>
+        <span class="meta-sep" aria-hidden="true"></span>
+        <span data-bind="bt.range" id="btRange">—</span>
+      </div>
+    </header>
+    <div class="bt-grid" id="btContent">
+      <div class="bt-left">
+        <div class="metrics" id="btMetrics">
+          <div class="metric">
+            <span class="m-label">方向准确率</span>
+            <b class="m-value num" id="btAcc">—</b>
+            <span class="m-sub" id="btAccSub">—</span>
+          </div>
+          <div class="metric">
+            <span class="m-label">交易胜率<span class="m-flag" id="btWinFlag" hidden>样本不足</span></span>
+            <b class="m-value num" id="btWin">—</b>
+            <span class="m-sub" id="btWinSub">—</span>
+          </div>
+          <div class="metric">
+            <span class="m-label">Logloss</span>
+            <b class="m-value num" id="btLogloss">—</b>
+            <span class="m-sub" id="btLoglossSub">—</span>
+          </div>
+          <div class="metric">
+            <span class="m-label">最大回撤</span>
+            <b class="m-value num" id="btMdd">—</b>
+            <span class="m-sub" id="btMddSub">—</span>
+          </div>
+          <div class="metric">
+            <span class="m-label">夏普</span>
+            <b class="m-value num" id="btSharpe">—</b>
+            <span class="m-sub" id="btSharpeSub">日频年化 · rf 0</span>
+          </div>
+        </div>
+        <div class="bt-sub">
+          <div class="bt-block">
+            <div class="col-head"><span>分方向命中率</span><span class="col-meta">precision / n</span></div>
+            <div class="dir-list" data-list="dirs" id="dirList"></div>
+          </div>
+          <div class="bt-block">
+            <div class="col-head"><span>基准对比</span><span class="col-meta">Δ = 策略 − 基准</span></div>
+            <div class="tbl-wrap tbl-wrap-sm">
+              <table class="tbl tbl-bench">
+                <thead><tr><th>基准</th><th class="num">准确率</th><th class="num">胜率</th><th class="num">收益</th><th class="num">Δ准确</th></tr></thead>
+                <tbody data-list="benchmarks" id="benchBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="bt-right">
+        <div class="col-head"><span>校准曲线</span><span class="col-meta">置信度 → 实际命中</span></div>
+        <div class="cal-wrap" id="calChart"></div>
+        <div class="cal-legend">
+          <span><i class="lg-line"></i>45° 完美校准</span>
+          <span><i class="lg-dot"></i>分桶点 · 点大小 = 样本量</span>
+        </div>
+        <p class="cal-note" id="calNote">—</p>
+      </div>
+    </div>
+    <div class="card-empty" id="btEmpty" hidden></div>
+    <footer class="card-foot">
+      <span data-bind="bt.foot">—</span>
+      <span class="foot-right">含佣金/印花税/滑点；历史结果不代表未来</span>
+    </footer>
+  </section>
+
+  <!-- 03 模拟盘净值 ---------------------------------------------------- -->
+  <section class="card span-7" style="--i:2" aria-labelledby="eqTitle">
+    <header class="card-head">
+      <h2 class="card-title" id="eqTitle"><span class="idx">03</span>模拟盘净值<span class="card-sub">paper · 非实盘</span></h2>
+      <div class="card-meta"><span data-bind="eq.meta">—</span></div>
+    </header>
+    <div class="chart-body">
+      <div class="chart-wrap" id="eqChart"></div>
+    </div>
+    <footer class="card-foot">
+      <span data-bind="eq.foot">—</span>
+      <span class="foot-right" data-bind="eq.init">初始资金 —</span>
+    </footer>
+  </section>
+
+  <!-- 04 账户 ---------------------------------------------------------- -->
+  <section class="card span-5" style="--i:3" aria-labelledby="paperTitle">
+    <header class="card-head">
+      <h2 class="card-title" id="paperTitle"><span class="idx">04</span>账户<span class="card-sub">模拟盘快照</span></h2>
+      <div class="card-meta"><span data-bind="paper.meta">—</span></div>
+    </header>
+    <div class="paper-body" id="paperContent">
+      <div class="metrics metrics-2">
+        <div class="metric">
+          <span class="m-label">现金</span>
+          <b class="m-value num" id="paperCash">—</b>
+          <span class="m-sub">可用资金</span>
+        </div>
+        <div class="metric">
+          <span class="m-label">持仓市值</span>
+          <b class="m-value num" id="paperMv">—</b>
+          <span class="m-sub" id="paperPosCount">持仓 0</span>
+        </div>
+        <div class="metric">
+          <span class="m-label">今日盈亏</span>
+          <b class="m-value num" id="paperToday">—</b>
+          <span class="m-sub">按最新价</span>
+        </div>
+        <div class="metric">
+          <span class="m-label">累计收益</span>
+          <b class="m-value num" id="paperRet">—</b>
+          <span class="m-sub" id="paperRetAbs">—</span>
+        </div>
+        <div class="metric metric-wide">
+          <span class="m-label">交易胜率</span>
+          <b class="m-value num" id="paperWin">—</b>
+          <span class="m-sub" id="paperWinSub">—</span>
+        </div>
+      </div>
+      <div class="paper-pos">
+        <div class="col-head"><span>持仓</span><span class="col-meta" id="paperPosMeta">—</span></div>
+        <div class="tbl-wrap tbl-wrap-sm">
+          <table class="tbl tbl-pos">
+            <thead><tr><th>标的</th><th class="num">数量</th><th class="num">成本</th><th class="num">现价</th><th class="num">盈亏</th></tr></thead>
+            <tbody data-list="positions" id="posBody"></tbody>
+          </table>
+        </div>
+        <div class="inline-empty" id="posEmpty" hidden>空仓。</div>
+      </div>
+    </div>
+    <div class="card-empty" id="paperEmpty" hidden></div>
+    <footer class="card-foot">
+      <span data-bind="paper.foot">—</span>
+      <span class="foot-right">T+1 · 佣金/印花税/过户费</span>
+    </footer>
+  </section>
+
+  <!-- 05 最近订单 ------------------------------------------------------ -->
+  <section class="card span-12" style="--i:4" aria-labelledby="ordersTitle">
+    <header class="card-head">
+      <h2 class="card-title" id="ordersTitle"><span class="idx">05</span>最近订单<span class="card-sub">order log</span></h2>
+      <div class="card-meta"><span data-bind="orders.meta">—</span></div>
+    </header>
+    <div class="tbl-wrap tbl-wrap-orders" id="ordersWrap">
+      <table class="tbl tbl-orders">
+        <colgroup>
+          <col class="c-time" /><col class="c-sym" /><col class="c-side" /><col class="c-qty" />
+          <col class="c-price" /><col class="c-filled" /><col class="c-fee" /><col class="c-status" />
+        </colgroup>
+        <thead><tr>
+          <th>时间</th><th>代码</th><th>方向</th><th class="num">数量</th>
+          <th class="num">目标价</th><th class="num">成交价</th><th class="num col-fee">费用</th><th>状态</th>
+        </tr></thead>
+        <tbody data-list="orders" id="ordersBody"></tbody>
+      </table>
+    </div>
+    <div class="card-empty" id="ordersEmpty" hidden></div>
+    <footer class="card-foot">
+      <span data-bind="orders.foot">—</span>
+      <span class="foot-right">模拟成交，不连接券商</span>
+    </footer>
+  </section>
+
+  <!-- 06 最近信号 ------------------------------------------------------ -->
+  <section class="card span-12" style="--i:5" aria-labelledby="signalsTitle">
+    <header class="card-head">
+      <h2 class="card-title" id="signalsTitle"><span class="idx">06</span>最近信号<span class="card-sub">signal log</span></h2>
+      <div class="card-meta">
+        <span data-bind="signals.meta">—</span>
+        <span class="meta-sep" aria-hidden="true"></span>
+        <span data-bind="signals.mode">60s 轮询</span>
+      </div>
+    </header>
+    <div class="tbl-wrap tbl-wrap-signals" id="signalsWrap">
+      <table class="tbl tbl-signals">
+        <colgroup>
+          <col class="c-time" /><col class="c-sym" /><col class="c-name" /><col class="c-dir" />
+          <col class="c-prob" /><col class="c-conf" /><col class="c-price" /><col class="c-status" />
+        </colgroup>
+        <thead><tr>
+          <th>时间</th><th>代码</th><th class="col-name">名称</th><th>方向</th>
+          <th class="num" title="P(up)：模型给出的上涨概率">P(涨)</th><th class="num">置信度</th><th class="num">价格</th><th>状态</th>
+        </tr></thead>
+        <tbody data-list="signals" id="signalsBody"></tbody>
+      </table>
+    </div>
+    <div class="card-empty" id="signalsEmpty" hidden></div>
+    <footer class="card-foot">
+      <span data-bind="signals.foot">—</span>
+      <span class="foot-right">置信度 &lt; 40% 不参与模拟盘</span>
+    </footer>
+  </section>
+
+</main>
+
+<footer class="page-foot">
+  <span class="foot-left"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>仅供研究学习 · 不构成投资建议</span>
+  <span class="foot-mid"><svg class="icon" aria-hidden="true"><use href="#i-db"/></svg>数据：AKShare 公开行情 · Cloudflare Worker / D1</span>
+  <span class="foot-right"><span data-bind="foot.mode">CLOUDFLARE PAGES</span> · <span data-bind="foot.gate">人机验证</span> · <span data-bind="foot.updated">更新 —</span> · <button class="linklike" id="footDisclaimer" type="button">免责声明</button></span>
+</footer>
+
+<!-- 人机验证（Turnstile）覆盖层：仅在收到 401 + challenge 时显示 -->
+<div class="gate" id="gate" hidden>
+  <div class="gate-backdrop" aria-hidden="true"></div>
+  <div class="gate-card" id="gateCard" role="dialog" aria-modal="true" aria-labelledby="gateTitle" aria-describedby="gateDesc" tabindex="-1">
+    <div class="gate-head">
+      <span class="gate-lock" aria-hidden="true"><svg class="icon"><use href="#i-lock"/></svg></span>
+      <h2 id="gateTitle">访问验证<span class="gate-sub">HUMAN CHALLENGE</span></h2>
+      <span class="tag tag-accent gate-mode" id="gateMode">TURNSTILE</span>
+    </div>
+    <div class="gate-body">
+      <p class="gate-desc" id="gateDesc">该看板在公网开放，需要一次性人机验证以换取访问凭据。验证只检查请求来源，不采集行情与研究数据。</p>
+      <div class="gate-widget" id="gateWidget"></div>
+      <div class="gate-check" id="gateCheck" hidden>
+        <svg class="gate-check-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.8 12.6 9.8 17.6 19.2 6.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>验证通过 · 正在载入数据</span>
+      </div>
+      <p class="gate-status" id="gateStatus" aria-live="polite">正在加载验证组件…</p>
+      <p class="gate-hint">验证组件由 Cloudflare Turnstile 提供；若未显示，请检查网络后点击「重新验证」。</p>
+      <p class="gate-fail" id="gateFail" hidden></p>
+    </div>
+    <div class="gate-foot">
+      <span class="gate-note">凭据保存 1 小时 · HttpOnly Cookie</span>
+      <button class="btn" id="gateRetry" type="button">重新验证</button>
+    </div>
+  </div>
+</div>
+
+<dialog id="disclaimerDialog" aria-labelledby="dlgTitle">
+  <div class="dlg-head">
+    <h2 id="dlgTitle">免责声明<span class="dlg-sub">DISCLAIMER</span></h2>
+    <button class="btn btn-icon" id="dlgClose" type="button" aria-label="关闭免责声明"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="dlg-body">
+    <p>本项目是个人研究与工程练手项目，不是投资顾问服务。使用前请知悉：</p>
+    <ol>
+      <li><b>不构成投资建议</b>：方向、概率、置信度、胜率与回测数字仅是对历史数据的统计与模型推断，不预测未来，不构成买卖建议。</li>
+      <li><b>模拟盘 ≠ 实盘</b>：模拟成交含理想化假设（简化滑点、忽略冲击成本、流动性充足），模拟盈利不代表真实可复制收益。</li>
+      <li><b>回测有局限</b>：过拟合、幸存者偏差、样本期选择、市场结构变化都会让回测偏乐观；胜率请结合 Wilson 95% 区间与样本量判断，不要只看点估计。</li>
+      <li><b>数据来源</b>：行情来自 AKShare 公开接口，可能延迟、缺失或错误；复权口径以数据层实现为准。</li>
+      <li><b>不做实盘</b>：不连接券商/交易所下单接口，不保存任何交易密钥或账户凭据。</li>
+      <li><b>风险自负</b>：任何人将本项目思路用于真实交易，风险自担；作者与贡献者不承担任何损失责任。</li>
+    </ol>
+    <p class="dlg-note">完整文本见仓库 <code>docs/DISCLAIMER.md</code>；对外分享结果时请保留本声明。</p>
+  </div>
+  <div class="dlg-foot">
+    <span>研究用途 · 非投资建议</span>
+    <button class="btn btn-primary" id="dlgOk" type="button">知道了</button>
+  </div>
+</dialog>
+
+<div class="sr-only" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
+<noscript><div class="noscript">本看板需要启用 JavaScript 才能加载数据。</div></noscript>
+
+<script src="app.js" defer></script>
+</body>
+</html>

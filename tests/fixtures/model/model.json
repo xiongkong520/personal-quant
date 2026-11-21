@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "version": "v0.0.0-fixture",
+  "kind": "softmax_regression",
+  "classes": ["down", "flat", "up"],
+  "features": ["f_ret", "f_vol"],
+  "mean": [0.001, 0.02],
+  "scale": [0.01, 0.05],
+  "coef": [
+    [0.9, 0.4],
+    [0.1, -0.2],
+    [-1.0, -0.2]
+  ],
+  "intercept": [0.2, -0.3, 0.1],
+  "trained_at": "2026-01-05T22:00:00+08:00",
+  "train_range": ["2023-01-01", "2024-12-31"],
+  "horizon": "1d",
+  "label_rule": "fixture: r = close[t+1]/close[t]-1; r>0.5% -> up, r<-0.5% -> down, else flat",
+  "metrics": { "accuracy": 0.42, "logloss": 1.05, "n": 500 }
+}

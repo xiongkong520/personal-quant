@@ -231,7 +231,17 @@ run(port: int, cfg: dict) -> None
 export_to_cloudflare(cfg: dict) -> dict
 ```
 
-Worker 端点（cloud-dev 实现）：`GET /api/health`、`GET /api/signals`、`POST /api/ingest`、`GET /api/stream`（SSE）。
+Worker 端点（cloud-dev 实现）：
+- `GET /api/health`：健康检查（D1 / model / 安全配置状态）
+- `GET /api/config`：人机验证配置（sitekey、challenge 路径）
+- `POST /api/verify`：Turnstile siteverify → 签发 `quant_pass` HMAC cookie（1h，HttpOnly/Secure/SameSite=Lax）
+- `GET /api/signals`：需 `quant_pass` cookie，否则 401 + `{"challenge":true}`
+- `GET /api/stream`：SSE（30s 心跳），同样需要 cookie
+- `GET /api/model`：当前模型 JSON（同样需要 cookie）
+- `POST /api/ingest`：本地推送，`x-ingest-token` 鉴权（或 Authorization Bearer）
+- `GET /`：静态看板（Pages assets）
+
+安全层（`src/security.ts`）：UA 黑名单（403）、Accept 校验、同源 CORS、按 `cf-connecting-ip` 限流 60/min（429 + Retry-After）、CSP / X-Frame-Options / Referrer-Policy 等安全头。
 D1 表 `signals` 字段与契约 §3.3 一致（少 paper_* 内部字段）。
 
 ## 10. 双端推理测试

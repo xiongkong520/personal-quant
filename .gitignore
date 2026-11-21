@@ -17,3 +17,5 @@ cloudflare/worker/dist/
 .env
 .env.*
 *.egg-info/
+cloudflare/worker/wrangler.local.toml
+cloudflare/worker/.dev.vars

@@ -1,0 +1,9 @@
+# 本地密钥（INGEST_TOKEN 等），绝不提交
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+# wrangler 本地状态 / 依赖 / 构建产物
+.wrangler/
+node_modules/
+dist/
+*.log

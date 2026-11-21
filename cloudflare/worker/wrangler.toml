@@ -1,0 +1,40 @@
+# 个人量化工作台 · Cloudflare Worker
+# 本地开发（无需 Cloudflare 账号）：npx wrangler dev --local --port 8788
+# 真实部署前须：wrangler login 或设置 CLOUDFLARE_API_TOKEN，并把 database_id 换成真实 D1 id。
+name = "personal-quant-worker"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1（本地 --local 模式使用 .wrangler/state 下的本地 SQLite，不需要账号）
+[[d1_databases]]
+binding = "DB"
+database_name = "personal_quant"
+database_id = "00000000-0000-0000-0000-000000000000" # 占位符：部署前替换为 `wrangler d1 create` 返回的 id（或用本地 wrangler.local.toml）
+migrations_dir = "migrations"
+
+# 静态看板（Pages 产物）由 Worker 的 Assets 绑定提供：
+#   /api/* 由 Worker 处理，其余路径命中 cloudflare/pages/ 下的静态文件。
+[assets]
+directory = "../pages"
+binding = "ASSETS"
+
+[observability]
+enabled = false
+
+[dev]
+port = 8788
+local_protocol = "http"
+
+# 公开配置（非密钥）。部署时填 Turnstile 真实 sitekey（或用本地 wrangler.local.toml）。
+# secret 一律用 wrangler secret put，不写在这里。
+# [vars]
+# TURNSTILE_SITEKEY = "0x4AAAAAAA..."
+
+# 生产限流建议绑定 KV（本地 --local 不需要，会自动用内存 Map）：
+#   npx wrangler kv namespace create RATE_LIMIT_KV
+#   npx wrangler kv namespace create RATE_LIMIT_KV --preview
+# 然后把下面注释打开并填入返回的 id：
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT_KV"
+# id = "<namespace id>"

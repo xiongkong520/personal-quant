@@ -1,0 +1,20 @@
+# 本地开发环境变量（用法：cp .dev.vars.example .dev.vars，然后改成你自己的值）
+# .dev.vars / .dev.vars.* 已在 .gitignore，不会提交；真实部署用 wrangler secret put，不要用这个文件。
+
+# 推送 token（POST /api/ingest 用）
+QUANT_INGEST_TOKEN=dev-secret-change-me
+
+# quant_pass cookie 的 HMAC-SHA256 密钥（不配置时 /api/verify 返回 503）
+# 生产生成方式：openssl rand -base64 32
+COOKIE_KEY=dev-cookie-key-change-me
+
+# Turnstile：本地默认用 Cloudflare 官方测试密钥（永远通过，不能用于生产）
+# 真实部署：sitekey 写 wrangler.toml [vars] 或 dashboard；secret 用 wrangler secret put TURNSTILE_SECRET
+TURNSTILE_SITEKEY=1x00000000000000000000AA
+TURNSTILE_SECRET=1x0000000000000000000000000000000AA
+
+# 可选：限流（次/分钟/IP），默认 60
+# RATE_LIMIT_PER_MIN=60
+
+# 可选：覆盖 Turnstile siteverify 地址（仅供离线测试；生产不要设置）
+# TURNSTILE_VERIFY_URL=http://127.0.0.1:8799/siteverify

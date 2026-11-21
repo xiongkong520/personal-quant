@@ -1,0 +1,39 @@
+# model-dev 自测用配置：数据来自 tests/fixtures/model 的合成日线，不碰真实 data/db。
+# 用法：
+#   python3 tests/fixtures/model/synth.py           # 生成 CSV + 合成库
+#   python -m quant.cli --config tests/fixtures/model/synth_config.yaml train
+#   python -m quant.cli --config tests/fixtures/model/synth_config.yaml backtest
+symbols:
+  - "600519"
+  - "000001"
+  - "300750"
+data:
+  dir: tests/fixtures/model/.generated/data
+  db: tests/fixtures/model/.generated/quant_synth.db
+  adjust: qfq
+  daily_start: "2022-01-01"
+  minute_period: 5
+  calendar_cache: tests/fixtures/model/.generated/trade_calendar.csv
+model:
+  horizon_days: 1
+  label_threshold: 0.005
+  train_years: 2
+  walk_forward_splits: 4
+  random_seed: 42
+  version: "v0.1.0"
+  out: tests/fixtures/model/.generated/model_synth.json
+backtest:
+  start: "2025-01-01"
+  end: "2026-11-20"
+  report_dir: tests/fixtures/model/.generated/reports
+paper:
+  initial_cash: 1000000
+  commission_rate: 0.00025
+  commission_min: 5
+  stamp_tax_sell: 0.0005
+  transfer_fee: 0.00001
+  slippage_bps: 5
+  max_position_pct: 0.2
+  lot_size: 100
+  t_plus_one: true
+  limit_check: true
