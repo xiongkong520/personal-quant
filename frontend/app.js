@@ -1,5 +1,5 @@
 /* ============================================================================
- * 个人量化工作台 · 看板前端（本地 FastAPI / Cloudflare Pages 共用同一份实现）
+ * 个人量化工作台 · 看板前端（本地/云端共用同一份实现）
  *
  * - 纯原生 JS：无构建、无依赖、无第三方图表库；图表全部手写 SVG / DOM。
  * - 模式由 index.html 的 window.QT_MODE 决定：
@@ -25,7 +25,8 @@
     equity: "/api/equity",
     backtest: "/api/backtest",
     verify: "/api/verify",
-    stream: "/api/stream"
+    stream: "/api/stream",
+    market: "/api/market"
   };
 
   /* 安全必需白名单：Turnstile 官方组件。除此之外页面不加载任何外部资源。 */
@@ -1055,14 +1056,14 @@
         title: "静态预览 · 未连接 API",
         message: "当前没有 /api/signals 服务（纯静态预览会以开发模式降级）。",
         command: "python -m quant.cli serve --port 8787",
-        note: "启动本地 API 后刷新页面即可看到真实信号与指标。",
+        note: "启动本地数据服务后刷新页面即可看到真实信号与指标。",
         icon: "i-warning"
       };
     }
     if (IS_CLOUD) {
       return {
         title: "等待云端信号",
-        message: "Worker 的 D1 里还没有信号。",
+        message: "暂无云端信号数据。",
         command: "python -m quant.cli export --target cloudflare",
         note: "本地推送后，SSE 会实时刷新方向信号与信号表。",
         icon: "i-warning"
@@ -1320,7 +1321,7 @@
     if (B["signal.tradeDate"]) setText(B["signal.tradeDate"], sig.tradeDate || DASH);
     if (B["sig.horizon"]) setText(B["sig.horizon"], sig.horizon);
     if (B["sig.expires"]) setText(B["sig.expires"], sig.expiresAt ? fmtMDHM(sig.expiresAt) : DASH);
-    if (B["sig.source"]) setText(B["sig.source"], sig.source === "cloud" ? "cloud / D1" : "local / sqlite");
+    if (B["sig.source"]) setText(B["sig.source"], sig.source === "cloud" ? "云端" : "本地");
 
     setProbBar(sig.prob);
     tweenNumber($("#probUp"), sig.prob.up, function (v) { return fmtPct(v); });
@@ -1622,15 +1623,15 @@
       if (IS_CLOUD) {
         conf = {
           title: "云端不提供回测报告",
-          message: "Worker 只存信号；回测由本地 Python 生成。",
+          message: "回测数据由本地研究环境生成。",
           command: "python -m quant.cli backtest --start 2025-01-01 --end 2026-11-20",
           note: "运行后查看本地看板 http://127.0.0.1:8787/。",
           icon: "i-chart"
         };
       } else if (!conf.message && state.dev) {
         conf = {
-          title: "静态预览 · 未连接本地 API",
-          message: "纯静态预览没有回测报告；启动本地 API 后读取 data/reports/backtest.json。",
+          title: "静态预览 · 未连接数据服务",
+          message: "启动本地数据服务后可查看回测报告。",
           command: "python -m quant.cli serve --port 8787",
           note: "或先运行 python -m quant.cli backtest 生成报告。",
           icon: "i-chart"
@@ -1751,14 +1752,14 @@
       if (content) content.hidden = true;
       show(empty, true);
       renderInto(empty, state.dev && !IS_CLOUD ? {
-        title: "静态预览 · 未连接本地 API",
-        message: "纯静态预览没有模拟盘快照；启动本地 API 后可见现金、持仓与胜率。",
+        title: "静态预览 · 未连接数据服务",
+        message: "启动本地数据服务后可查看账户、持仓与胜率。",
         command: "python -m quant.cli serve --port 8787",
         note: "本地看板：http://127.0.0.1:8787/",
         icon: "i-warning"
       } : IS_CLOUD ? {
         title: "云端不提供模拟盘",
-        message: "Worker 只存信号，模拟盘账户与净值在本地 FastAPI 看板。",
+        message: "模拟盘数据由本地研究环境提供。",
         command: "python -m quant.cli serve --port 8787",
         note: "本地打开 http://127.0.0.1:8787/ 查看账户与净值。",
         icon: "i-warning"
@@ -1867,7 +1868,7 @@
       if (wrap) wrap.hidden = true;
       show(empty, true);
       renderInto(empty, state.dev && !IS_CLOUD ? {
-        title: "静态预览 · 未连接本地 API",
+        title: "静态预览 · 未连接数据服务",
         message: "纯静态预览没有订单记录。",
         command: "python -m quant.cli serve --port 8787",
         icon: "i-warning"
@@ -2033,13 +2034,13 @@
       state.rendered.equity = "empty";
       wrap.dataset.built = "";
       var empty = state.dev && !IS_CLOUD ? {
-        title: "静态预览 · 未连接本地 API",
-        message: "纯静态预览没有净值数据；启动本地 API 并推进模拟盘后显示曲线。",
+        title: "静态预览 · 未连接数据服务",
+        message: "启动本地数据服务并推进模拟盘后可查看净值曲线。",
         command: "python -m quant.cli serve --port 8787",
         icon: "i-chart"
       } : IS_CLOUD ? {
         title: "云端不提供净值曲线",
-        message: "净值来自本地模拟盘，Worker 只存信号。",
+        message: "净值数据来自本地模拟盘。",
         icon: "i-chart"
       } : {
         title: "暂无净值曲线",
@@ -2181,6 +2182,120 @@
     if (!state.gate.passed) void openGate();
   }
 
+
+  /* ============================== 市场整体面板 ============================== */
+  function fmtNum(v, digits) {
+    if (v === null || v === undefined || isNaN(v)) return "—";
+    var d = digits === undefined ? 2 : digits;
+    return Number(v).toFixed(d);
+  }
+  function fmtInt(v) {
+    if (v === null || v === undefined || isNaN(v)) return "—";
+    return Number(v).toLocaleString("zh-CN");
+  }
+  function fmtClock(iso) {
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return String(iso || "—").slice(11, 16) || "—";
+      return d.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    } catch (e) { return "—"; }
+  }
+  function createMarketPanel() {
+    var main = $("#main");
+    if (!main || $("#marketCard")) return;
+    var sec = document.createElement("section");
+    sec.className = "card span-12";
+    sec.id = "marketCard";
+    sec.style.setProperty("--i", "0");
+    sec.setAttribute("aria-labelledby", "mktTitle");
+    sec.innerHTML =
+      '<header class="card-head">' +
+        '<div><p class="eyebrow">市场整体</p><h2 id="mktTitle">00 指数 · 情绪 · 冰点</h2></div>' +
+        '<div class="card-meta"><span id="mktUpdated">更新 —</span><span class="dot" id="mktDot" aria-hidden="true"></span></div>' +
+      '</header>' +
+      '<div class="mkt-grid">' +
+        '<div class="mkt-indices" id="mktIndices" aria-live="polite"><div class="mkt-empty">暂无市场数据</div></div>' +
+        '<div class="mkt-sentiment">' +
+          '<div class="mkt-row"><span class="muted">情绪温度</span><span><b class="num" id="mktScore">—</b><span class="pill" id="mktState">—</span></span></div>' +
+          '<div class="sent-track"><i id="mktFill"></i><b id="mktMark"></b></div>' +
+          '<div class="mkt-row muted"><span>涨跌家数</span><span id="mktBreadthText">—</span></div>' +
+          '<div class="breadth-bar" id="mktBreadthBar"><i class="up"></i><i class="flat"></i><i class="down"></i></div>' +
+          '<div class="mkt-row muted"><span>涨停 <b class="num up" id="mktLu">—</b></span><span>跌停 <b class="num down" id="mktLd">—</b></span><span>活跃度 <b class="num" id="mktActive">—</b></span></div>' +
+        '</div>' +
+        '<div class="mkt-dir">' +
+          '<p class="muted">市场整体方向</p>' +
+          '<div class="dir-pill" id="mktDir">—</div>' +
+          '<p class="muted" id="mktDirMeta">—</p>' +
+        '</div>' +
+      '</div>';
+    main.insertBefore(sec, main.firstChild);
+  }
+  function renderMarket(snapshot, updatedAt) {
+    var box = $("#mktIndices");
+    if (!box) return;
+    if (!snapshot || !snapshot.indices || !snapshot.indices.length) {
+      box.innerHTML = '<div class="mkt-empty">暂无市场数据</div>';
+      setText($("#mktUpdated"), "更新 —");
+      return;
+    }
+    var html = "";
+    snapshot.indices.forEach(function (it) {
+      var chg = Number(it.pct_chg || 0);
+      var cls = chg > 0 ? "up" : (chg < 0 ? "down" : "flat");
+      var dir = it.direction === "up" ? "偏多" : (it.direction === "down" ? "偏空" : "震荡");
+      html += '<div class="idx-card">' +
+        '<span class="idx-name">' + esc(it.name) + '</span>' +
+        '<b class="idx-px num">' + fmtNum(it.price) + '</b>' +
+        '<span class="idx-chg num ' + cls + '">' + (chg > 0 ? "+" : "") + fmtNum(chg) + '%</span>' +
+        '<span class="idx-dir ' + cls + '">' + dir + ' ' + fmtNum((it.confidence || 0) * 100, 0) + '%</span>' +
+      '</div>';
+    });
+    box.innerHTML = html;
+    var sent = snapshot.sentiment || {};
+    setText($("#mktScore"), fmtNum(sent.score, 1));
+    var stateEl = $("#mktState");
+    if (stateEl) {
+      setText(stateEl, sent.label || "—");
+      stateEl.className = "pill" + (sent.state === "ice" ? " ice" : (sent.state === "hot" ? " hot" : ""));
+    }
+    var pct = Math.max(0, Math.min(100, Number(sent.score || 0)));
+    var fill = $("#mktFill"); if (fill) fill.style.width = pct + "%";
+    var mark = $("#mktMark"); if (mark) mark.style.left = pct + "%";
+    var act = snapshot.activity || {};
+    setText($("#mktBreadthText"), "涨 " + fmtInt(act.up) + " / 跌 " + fmtInt(act.down));
+    setText($("#mktLu"), fmtInt(act.limit_up));
+    setText($("#mktLd"), fmtInt(act.limit_down));
+    setText($("#mktActive"), fmtNum(act.active_pct) + "%");
+    var bar = $("#mktBreadthBar");
+    if (bar) {
+      var up = Number(act.up || 0), down = Number(act.down || 0), flat = Number(act.flat || 0);
+      var total = Math.max(1, up + down + flat);
+      bar.children[0].style.width = (up / total * 100) + "%";
+      bar.children[1].style.width = (flat / total * 100) + "%";
+      bar.children[2].style.width = (down / total * 100) + "%";
+    }
+    var md = snapshot.market_direction || {};
+    var dirEl = $("#mktDir");
+    if (dirEl) {
+      var ml = md.direction === "up" ? "偏多" : (md.direction === "down" ? "偏空" : "震荡");
+      setText(dirEl, ml);
+      dirEl.className = "dir-pill " + (md.direction === "up" ? "up" : (md.direction === "down" ? "down" : ""));
+    }
+    setText($("#mktDirMeta"), "置信度 " + fmtNum((md.confidence || 0) * 100, 1) + "%");
+    setText($("#mktUpdated"), "更新 " + fmtClock(updatedAt || snapshot.asof) + " · 收盘数据");
+  }
+  function loadMarket() {
+    return getJSON(EP.market).then(function (r) {
+      if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
+      if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
+      if (r.error) { return { kind: "error", error: r.error }; }
+      state.market = r.data && r.data.snapshot ? r.data.snapshot : null;
+      state.marketUpdatedAt = r.data && r.data.updated_at ? r.data.updated_at : null;
+      renderMarket(state.market, state.marketUpdatedAt);
+      return { kind: state.market ? "ok" : "empty" };
+    });
+  }
+
   function loadSignals() {
     return getJSON(EP.signals + "?limit=200").then(function (r) {
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
@@ -2292,7 +2407,7 @@
     state.inflight = true;
     var btn = $("#refreshBtn");
     if (btn) btn.classList.add("is-loading");
-    return Promise.all([loadSignals(), loadPaper(), loadEquity(), loadBacktest()]).then(function (results) {
+    return Promise.all([loadSignals(), loadMarket(), loadPaper(), loadEquity(), loadBacktest()]).then(function (results) {
       state.inflight = false;
       if (btn) btn.classList.remove("is-loading");
       evaluateConnection(results);
@@ -2554,6 +2669,7 @@
   /* ============================== 启动 ============================== */
   function init() {
     collectDom();
+    createMarketPanel();
     bindEvents();
     bindDialog();
     bindTabsKeyboard();

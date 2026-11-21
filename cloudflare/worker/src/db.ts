@@ -183,3 +183,38 @@ export async function d1Health(db: D1Database | undefined): Promise<D1Health> {
     return { status: "error", error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+
+// ---------------------------------------------------------------- market ----
+
+/** 市场整体快照（指数/涨跌家数/情绪分/冰点），对应 D1 market_snapshots 表。 */
+export async function insertMarketSnapshot(
+  db: D1Database,
+  snapshot: Record<string, unknown>,
+): Promise<{ asof: string }> {
+  await ensureSchema(db);
+  const asof = typeof snapshot["asof"] === "string" ? snapshot["asof"] : new Date().toISOString();
+  const tradeDate = typeof snapshot["trade_date"] === "string" ? snapshot["trade_date"] : null;
+  const payload = JSON.stringify(snapshot);
+  await db
+    .prepare(`INSERT INTO market_snapshots (asof, trade_date, payload, created_at) VALUES (?, ?, ?, ?)`)
+    .bind(asof, tradeDate, payload, new Date().toISOString())
+    .run();
+  return { asof };
+}
+
+/** 最新一条市场快照；无数据返回 null。 */
+export async function queryLatestMarket(
+  db: D1Database,
+): Promise<{ snapshot: Record<string, unknown>; updated_at: string } | null> {
+  await ensureSchema(db);
+  const row = await db
+    .prepare(`SELECT payload, created_at FROM market_snapshots ORDER BY asof DESC, id DESC LIMIT 1`)
+    .first<{ payload: string; created_at: string }>();
+  if (!row) return null;
+  try {
+    return { snapshot: JSON.parse(row.payload) as Record<string, unknown>, updated_at: row.created_at };
+  } catch {
+    return null;
+  }
+}

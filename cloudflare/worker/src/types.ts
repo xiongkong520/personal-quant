@@ -11,8 +11,11 @@ export interface Env {
   INGEST_TOKEN?: string;
   /** 可选：覆盖 worker 版本号（默认 0.1.0） */
   WORKER_VERSION?: string;
-  /** 限流（次/分钟/客户端 IP），默认 60；测试可调小/调大 */
+  /** 限流（次/分钟/客户端 IP），默认 120；测试可调小/调大 */
   RATE_LIMIT_PER_MIN?: string;
+  /** 可信 IP 白名单（逗号分隔；支持精确 IP 与 a.b.c.* 前缀通配）：
+   *  这些 IP 免人机验证、免限流，用于开发测试与自动化验收 */
+  TRUSTED_IPS?: string;
   /** 可选：跨 isolate 限流用 KV namespace；未绑定时用内存 Map */
   RATE_LIMIT_KV?: KVNamespace;
   /** Turnstile：sitekey 是公开值（可写 wrangler.toml [vars]），secret 必须用 wrangler secret 保存 */

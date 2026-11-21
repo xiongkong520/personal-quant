@@ -65,6 +65,23 @@ def cmd_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_market(args: argparse.Namespace) -> int:
+    from quant.data.market import build_market_snapshot
+
+    cfg = load_config(args.config)
+    snap = build_market_snapshot(cfg)
+    out = Path(args.out) if args.out else cfg_path(cfg, "data.dir") / "reports" / "market.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({
+        "status": snap["status"],
+        "sentiment": snap["sentiment"],
+        "market_direction": snap["market_direction"],
+        "out": str(out),
+    }, ensure_ascii=False))
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     from quant.backtest.engine import run_backtest
 
@@ -124,6 +141,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--symbols", default=None)
     s.add_argument("--out", default=None)
     s.set_defaults(func=cmd_signal)
+
+    mk = sub.add_parser("market", help="市场整体：指数/情绪/冰点/方向")
+    mk.add_argument("--out", default=None)
+    mk.set_defaults(func=cmd_market)
 
     b = sub.add_parser("backtest", help="回测并生成报告")
     b.add_argument("--start", default=None)

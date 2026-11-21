@@ -166,6 +166,26 @@ export function clientIp(request: Request): string {
   return "local";
 }
 
+/** 可信 IP 白名单（env.TRUSTED_IPS，逗号分隔；支持精确 IP 与 a.b.c.* 前缀通配）。 */
+export function readTrustedIps(env: Env): string[] {
+  return (env.TRUSTED_IPS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function ipMatches(ip: string, pattern: string): boolean {
+  return pattern.endsWith("*") ? ip.startsWith(pattern.slice(0, -1)) : ip === pattern;
+}
+
+/** 请求是否来自可信 IP（免人机验证/限流，用于开发测试与自动化验收）。 */
+export function isTrustedIp(request: Request, env: Env): boolean {
+  const patterns = readTrustedIps(env);
+  if (patterns.length === 0) return false;
+  const ip = clientIp(request);
+  return patterns.some((p) => ipMatches(ip, p));
+}
+
 interface MemoryWindow {
   count: number;
   resetAt: number;

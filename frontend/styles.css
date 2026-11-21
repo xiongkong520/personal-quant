@@ -1043,3 +1043,30 @@ dialog::backdrop { background: rgba(5, 7, 11, 0.68); }
   .card { animation: none; opacity: 1; transform: none; }
   .eq-svg .eq-area { transition: none; }
 }
+
+/* ============================== 市场整体面板 ============================== */
+#marketCard .mkt-grid { display: grid; grid-template-columns: 1.4fr 1.4fr 0.9fr; gap: 16px; }
+@media (max-width: 900px) { #marketCard .mkt-grid { grid-template-columns: 1fr; } }
+#marketCard .mkt-indices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.idx-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-1); display: grid; gap: 2px; }
+.idx-name { color: var(--text-1); font-size: 12px; }
+.idx-px { font-size: 20px; font-family: var(--font-num, ui-monospace, monospace); }
+.idx-chg { font-size: 13px; }
+.idx-dir { font-size: 12px; color: var(--text-2); }
+.idx-chg.up { color: var(--up); } .idx-chg.down { color: var(--down); } .idx-chg.flat { color: var(--flat); }
+.idx-dir.up { color: var(--up); } .idx-dir.down { color: var(--down); }
+.mkt-sentiment { display: grid; gap: 8px; align-content: start; }
+.mkt-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.sent-track { position: relative; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #4C8DFF 0%, #8A94A6 50%, #FF4D4F 100%); opacity: .9; }
+.sent-track i { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; border-radius: 4px; background: rgba(255, 255, 255, .28); transition: width .5s cubic-bezier(.22, 1, .36, 1); }
+.sent-track b { position: absolute; top: -3px; width: 2px; height: 14px; background: var(--text-0); left: 0%; transition: left .5s cubic-bezier(.22, 1, .36, 1); }
+.breadth-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--bg-2); }
+.breadth-bar i.up { background: var(--up); } .breadth-bar i.flat { background: var(--flat); } .breadth-bar i.down { background: var(--down); }
+.pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); font-size: 12px; color: var(--text-1); margin-left: 8px; }
+.pill.ice { color: #FFD666; border-color: rgba(245, 166, 35, .6); background: rgba(245, 166, 35, .12); }
+.pill.hot { color: #FF9CA0; border-color: rgba(255, 77, 79, .6); background: rgba(255, 77, 79, .12); }
+.mkt-dir { display: grid; gap: 8px; align-content: start; }
+.dir-pill { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; border-radius: 8px; border: 1px solid var(--border); font-weight: 600; font-size: 15px; }
+.dir-pill.up { color: var(--up); border-color: rgba(255, 77, 79, .45); background: rgba(255, 77, 79, .12); }
+.dir-pill.down { color: var(--down); border-color: rgba(34, 197, 94, .45); background: rgba(34, 197, 94, .12); }
+.mkt-empty { padding: 18px; color: var(--text-2); }

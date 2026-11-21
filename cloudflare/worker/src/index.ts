@@ -22,7 +22,7 @@
 import modelJson from "../models/model.json" with { type: "json" };
 
 import { confidenceOf, directionOf, predictProba, validateModel, type QuantModel } from "./model.ts";
-import { d1Health, insertSignals, querySignals } from "./db.ts";
+import { d1Health, insertMarketSnapshot, insertSignals, queryLatestMarket, querySignals } from "./db.ts";
 import { extractIngestToken, MAX_INGEST_BYTES, normalizeSignal, nowShanghai, parseIngestBody, timingSafeEqual } from "./signals.ts";
 import {
   applySecurityHeaders,
@@ -31,6 +31,7 @@ import {
   checkSameOrigin,
   checkUserAgent,
   clientIp,
+  isTrustedIp,
   COOKIE_NAME,
   COOKIE_TTL_SECONDS,
   issuePassCookie,
@@ -44,7 +45,7 @@ import {
 } from "./security.ts";
 import type { Env, SignalRow } from "./types.ts";
 
-const SERVICE = "personal-quant-cloudflare-worker";
+const SERVICE = "personal-quant-dashboard";
 const VERSION = "0.2.0";
 const SCHEMA_VERSION = 1;
 
@@ -132,13 +133,14 @@ function challengeRequired(): Response {
       ok: false,
       error: "challenge_required",
       challenge: true,
-      message: "先完成人机验证：GET /api/config -> Turnstile -> POST /api/verify",
+      message: "请先完成人机验证后继续。",
     },
     401,
   );
 }
 
 async function requireChallenge(request: Request, env: Env): Promise<Response | null> {
+  if (isTrustedIp(request, env)) return null;
   if (await verifyPassCookie(env, request.headers.get("cookie"))) return null;
   return challengeRequired();
 }
@@ -151,61 +153,27 @@ function readIngestToken(env: Env): string {
 // ---------------------------------------------------------------- health ----
 
 async function handleHealth(env: Env): Promise<Response> {
-  const d1 = await d1Health(env.DB);
-  const tokenConfigured = readIngestToken(env).length > 0;
-  const cookieKeyConfigured = readCookieKey(env).length > 0;
-  const ok = d1.status === "ok" && modelError === null;
-  return jsonResponse(
-    {
-      schema: SCHEMA_VERSION,
-      ok,
-      service: SERVICE,
-      version: env.WORKER_VERSION ?? VERSION,
-      now: nowShanghai(),
-      environment: "cloudflare-worker",
-      d1,
-      ingest: {
-        token_configured: tokenConfigured,
-        auth: "Authorization: Bearer <QUANT_INGEST_TOKEN> 或 X-Ingest-Token",
-        endpoint: "POST /api/ingest",
-      },
-      security: {
-        ua_filter: false,
-        accept_check: false,
-        note: "UA/Accept 黑名单已取消（用户要求），反爬交由 Turnstile 人机验证与边缘 WAF（需自定义域名）",
-        same_origin_cors: true,
-        rate_limit_per_min: readRateLimitPerMin(env),
-        rate_limit_backend: env.RATE_LIMIT_KV ? "kv" : "memory",
-        challenge_required_for: ["/api/signals", "/api/stream", "/api/model"],
-        cookie: { name: COOKIE_NAME, ttl_seconds: COOKIE_TTL_SECONDS, cookie_key_configured: cookieKeyConfigured },
-        turnstile: {
-          sitekey: readTurnstileSitekey(env),
-          using_test_keys: readTurnstileSitekey(env) === TURNSTILE_TEST_SITEKEY || !env.TURNSTILE_SECRET,
-          secret_configured: Boolean((env.TURNSTILE_SECRET ?? "").trim()),
-          verify_endpoint_override: Boolean((env.TURNSTILE_VERIFY_URL ?? "").trim()),
-        },
-      },
-      model: {
-        schema: QUANT_MODEL.schema,
-        version: QUANT_MODEL.version,
-        kind: QUANT_MODEL.kind,
-        classes: QUANT_MODEL.classes,
-        features: Array.isArray(QUANT_MODEL.features) ? QUANT_MODEL.features.length : 0,
-        error: modelError,
-      },
-      endpoints: [
-        "GET /api/config",
-        "POST /api/verify",
-        "GET /api/health",
-        "GET /api/signals",
-        "POST /api/ingest",
-        "GET /api/stream",
-        "GET /api/model",
-        "GET / (静态看板)",
-      ],
-    },
-    ok ? 200 : 503,
-  );
+  // 对外只暴露运行状态；数据库/后端实现细节不写入响应（需要时看服务端日志）
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    service: SERVICE,
+    version: env.WORKER_VERSION ?? VERSION,
+    now: nowShanghai(),
+    model_version: QUANT_MODEL.version,
+  });
+}
+
+/** GET /api/me：访客自己的 IP 与是否可信（开发测试用；不暴露内部实现）。 */
+function handleMe(request: Request, env: Env): Response {
+  const trusted = isTrustedIp(request, env);
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    ip: clientIp(request),
+    trusted,
+    challenge_required: !trusted,
+  });
 }
 
 // ---------------------------------------------------------------- config ----
@@ -264,7 +232,7 @@ async function readTokenField(request: Request): Promise<{ token?: string; error
 
 async function handleVerify(request: Request, env: Env): Promise<Response> {
   if (!readCookieKey(env)) {
-    return errorResponse(503, "server_misconfigured", "COOKIE_KEY 未配置：本地写 .dev.vars；部署 wrangler secret put COOKIE_KEY");
+    return errorResponse(503, "server_misconfigured", "验证服务暂不可用，请稍后重试");
   }
   const parsed = await readTokenField(request);
   if (parsed.error || !parsed.token) return errorResponse(400, "invalid_body", parsed.error ?? "缺少 token");
@@ -275,7 +243,7 @@ async function handleVerify(request: Request, env: Env): Promise<Response> {
   }
   const pass = await issuePassCookie(env);
   if (!pass) {
-    return errorResponse(503, "server_misconfigured", "COOKIE_KEY 未配置，无法签发 quant_pass");
+    return errorResponse(503, "server_misconfigured", "验证服务暂不可用，请稍后重试");
   }
   return jsonResponse(
     {
@@ -306,7 +274,7 @@ function handleModel(): Response {
       schema: SCHEMA_VERSION,
       ok: modelError === null,
       source: "cloudflare/worker/models/model.json",
-      note: "Worker 与 Python 使用同一份 §5 权重；改动后执行 npm run sync-model 重新同步。",
+      note: "模型权重已同步。",
       model: QUANT_MODEL,
       parity_probe: { zero_features: probe },
     },
@@ -317,7 +285,7 @@ function handleModel(): Response {
 // -------------------------------------------------------------- signals ----
 
 async function handleSignals(env: Env, url: URL): Promise<Response> {
-  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置（检查 wrangler.toml）");
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
 
   const limitRaw = Number(url.searchParams.get("limit") ?? "200");
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 500) : 200;
@@ -355,7 +323,7 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
   const provided = extractIngestToken(request);
   if (!provided) {
     return jsonResponse(
-      { schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "缺少 token：Authorization: Bearer <token> 或 X-Ingest-Token: <token>" },
+      { schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" },
       401,
       { "www-authenticate": "Bearer" },
     );
@@ -365,7 +333,7 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
       "www-authenticate": "Bearer",
     });
   }
-  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置（检查 wrangler.toml）");
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
 
   const declaredLength = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(declaredLength) && declaredLength > MAX_INGEST_BYTES) {
@@ -433,6 +401,49 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
   });
 }
 
+// ---------------------------------------------------------------- market ----
+
+/** POST /api/market/ingest：本地推送市场整体快照（x-ingest-token 鉴权）。 */
+async function handleMarketIngest(request: Request, env: Env): Promise<Response> {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
+  }
+  const raw = body as Record<string, unknown> | null;
+  const snapshot = raw && typeof raw["snapshot"] === "object" && raw["snapshot"] !== null ? raw["snapshot"] : raw;
+  if (!snapshot || typeof snapshot !== "object") {
+    return errorResponse(400, "invalid_body", "缺少市场快照内容");
+  }
+  const saved = await insertMarketSnapshot(env.DB, snapshot as Record<string, unknown>);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1, asof: saved.asof });
+}
+
+/** GET /api/market：最新市场整体快照（人机验证 / 可信 IP）。 */
+async function handleMarket(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const latest = await queryLatestMarket(env.DB);
+  if (!latest) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: true, snapshot: null, updated_at: null }, 200);
+  }
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    snapshot: latest.snapshot,
+    updated_at: latest.updated_at,
+  });
+}
+
 // ------------------------------------------------------------------ SSE ----
 
 function handleStream(request: Request, env: Env): Response {
@@ -456,7 +467,7 @@ function handleStream(request: Request, env: Env): Response {
   };
 
   if (!env.DB) {
-    return errorResponse(503, "d1_not_configured", "D1 binding 未配置（检查 wrangler.toml）");
+    return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
   }
 
   const stream = new ReadableStream<Uint8Array>({
@@ -483,7 +494,7 @@ function handleStream(request: Request, env: Env): Response {
           lastSignature = signature;
           emit("signals", { schema: SCHEMA_VERSION, items, updated_at, heartbeat_sec: SSE_HEARTBEAT_MS / 1000 }, updated_at ?? undefined);
         } catch (err) {
-          emit("error", { schema: SCHEMA_VERSION, error: "query_failed", message: err instanceof Error ? err.message : String(err), now: nowShanghai() });
+          emit("error", { schema: SCHEMA_VERSION, error: "query_failed", message: "数据读取失败，请稍后重试", now: nowShanghai() });
         } finally {
           busy = false;
         }
@@ -557,7 +568,7 @@ async function handleStatic(request: Request, env: Env, path: string): Promise<R
       schema: SCHEMA_VERSION,
       ok: true,
       service: SERVICE,
-      message: "Worker 已启动；静态看板产物尚未提供（cloudflare/pages/ 由 frontend-dev 产出）。",
+      message: "页面资源暂不可用，请稍后重试。",
       api: {
         config: "GET /api/config",
         verify: "POST /api/verify",
@@ -600,6 +611,8 @@ function handlePreflight(request: Request): Response {
  *     边缘防护请在「自定义域名 + Cloudflare 免费套餐 WAF/Bot Fight Mode」层配置。
  */
 async function securityGate(request: Request, env: Env, path: string): Promise<Response | null> {
+  // 可信 IP 白名单：免人机验证与限流（开发测试/自动化验收，见 env.TRUSTED_IPS）
+  if (isTrustedIp(request, env)) return null;
   const isMachineIngest = path === "/api/ingest" && request.method === "POST";
   if (!isMachineIngest) {
     const ua = checkUserAgent(request);
@@ -625,6 +638,11 @@ export default {
       const blocked = await securityGate(request, env, path);
       if (blocked) return applySecurityHeaders(blocked);
 
+      if (path === "/api/me") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(handleMe(request, env));
+      }
       if (path === "/api/config") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
@@ -660,6 +678,16 @@ export default {
         const challenge = await requireChallenge(request, env);
         if (challenge) return applySecurityHeaders(challenge);
         return applySecurityHeaders(handleStream(request, env));
+      }
+      if (path === "/api/market") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleMarket(request, env));
+      }
+      if (path === "/api/market/ingest") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleMarketIngest(request, env));
       }
       if (path === "/api/ingest") {
         const guard = methodGuard(request, ["POST"]);

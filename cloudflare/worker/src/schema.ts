@@ -26,6 +26,14 @@ export const SCHEMA_STATEMENTS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_signals_symbol_asof ON signals (symbol, asof DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals (created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_signals_trade_date ON signals (trade_date DESC)`,
+  `CREATE TABLE IF NOT EXISTS market_snapshots (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  asof       TEXT NOT NULL,
+  trade_date TEXT,
+  payload    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_market_asof ON market_snapshots (asof DESC)`,
 ];
 
 export const SCHEMA_SQL = `${SCHEMA_STATEMENTS.join(";\n\n")};\n`;
