@@ -1,0 +1,42 @@
+# 个人量化工作台配置（契约相关参数勿改语义，可新增键并在 config/schema.md 记录）
+
+symbols:
+  - "600519"   # 贵州茅台
+  - "000001"   # 平安银行
+  - "300750"   # 宁德时代
+
+data:
+  dir: data
+  db: data/db/quant.db
+  adjust: qfq            # 前复权
+  daily_start: "2022-01-01"
+  minute_period: 5       # 5 分钟线
+  calendar_cache: data/raw/trade_calendar.csv
+
+model:
+  horizon_days: 1        # 预测 T+1
+  label_threshold: 0.005 # |收益| < 0.5% 记为 flat
+  train_years: 2
+  walk_forward_splits: 4
+  random_seed: 42
+
+backtest:
+  start: "2025-01-01"
+  end: "2026-11-20"
+  report_dir: data/reports
+
+paper:
+  initial_cash: 1000000
+  commission_rate: 0.00025   # 万 2.5
+  commission_min: 5          # 最低 5 元
+  stamp_tax_sell: 0.0005     # 卖出印花税 0.05%
+  transfer_fee: 0.00001      # 过户费 0.001% 双向
+  slippage_bps: 5            # 5 bps
+  max_position_pct: 0.2      # 单票最大仓位 20%
+  lot_size: 100
+  t_plus_one: true
+  limit_check: true
+
+cloudflare:
+  worker_url: "http://127.0.0.1:8788"
+  push_interval_sec: 60
