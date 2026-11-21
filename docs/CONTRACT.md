@@ -175,6 +175,7 @@ python -m quant.cli export  --target cloudflare
 - 模拟盘：T+1、涨跌停拒单、费用、滑点各有单测（构造极端行情）。
 - Cloudflare：`wrangler dev --local` 起得来，`/api/health`、`/api/signals` 返回契约 JSON；D1 本地模式建表成功。
 - 全链路：fetch → train → backtest → paper → serve 能按顺序跑通（`scripts/smoke.sh`）。
+- **前端（frontend/ 与 cloudflare/pages/）必须遵循 `docs/DESIGN.md`**：无 CDN/在线字体、无 AI 模板味、60fps 动效、reduced-motion 支持、数据更新只 patch 不整页刷新。
 
 ## 9. 模块入口签名（CLI 按这些调用，实现方不得改名）
 
