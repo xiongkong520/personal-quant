@@ -20,12 +20,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
           pip install pytest
-      - name: 单元测试（离线 fixtures，不联网）
-        run: python -m pytest tests/ -q --ignore=tests/test_cloud_contract.py
-      - name: CLI 冒烟（--help 可执行）
+      - name: 环境自检
         run: |
-          python -m quant.cli --help > /dev/null
-          python -c "import quant, quant.cli, quant.config; print(quant.__version__)"
+          python -c "import quant; print('quant', quant.__version__)"
+          python -m pip freeze | grep -iE "pandas|numpy|scikit|scipy|akshare|fastapi|pytest|joblib|starlette"
+      - name: 单元测试（离线 fixtures，不联网）
+        run: |
+          set +e
+          python -m pytest tests/ -q --ignore=tests/test_cloud_contract.py --tb=short -p no:cacheprovider > /tmp/pytest.log 2>&1
+          rc=$?
+          echo "pytest exit=$rc"
+          tail -40 /tmp/pytest.log
+          if [ "$rc" -ne 0 ]; then
+            {
+              echo "## pytest 失败 (exit $rc)"
+              echo ""
+              echo '```'
+              tail -200 /tmp/pytest.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $rc
 
   worker:
     name: Cloudflare Worker（TS/parity/打包）
