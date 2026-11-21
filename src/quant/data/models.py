@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 import numpy as np
@@ -135,9 +135,13 @@ def limit_prices(
     )
 
 
+# A 股时区固定 +08:00（契约 §3.3/§4：asof/created_at 统一带 +08:00，CI 的 UTC 环境也一致）
+TZ = timezone(timedelta(hours=8))
+
+
 def now_iso() -> str:
-    """当前本地时间 ISO 字符串（带 +08:00 时区）。"""
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    """当前时间 ISO 字符串（固定 +08:00，不随宿主时区变化）。"""
+    return datetime.now(TZ).isoformat(timespec="seconds")
 
 
 def to_compact_asof(asof: str) -> str:
