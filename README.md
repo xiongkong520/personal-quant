@@ -2,6 +2,8 @@
 
 ![CI](https://github.com/xiongkong520/personal-quant/actions/workflows/ci.yml/badge.svg)
 
+**在线看板（国内可访问）**：https://quant-board-9y2.pages.dev
+
 **由 DeepSeek 从零构建**的个人量化研究台：A股数据采集 → 特征与方向判断 → 历史回测与胜率推算 → 模拟盘（T+1/涨跌停/费用/滑点）→ 本地与 Cloudflare 实时看板。
 
 > ⚠️ **免责声明：仅供研究学习，不构成投资建议。** 本项目不做实盘、不连接券商/交易所下单接口、不保存任何交易密钥。市场有风险，决策自负。详见 [docs/DISCLAIMER.md](docs/DISCLAIMER.md)。

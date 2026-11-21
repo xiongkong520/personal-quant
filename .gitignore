@@ -19,3 +19,4 @@ cloudflare/worker/dist/
 *.egg-info/
 cloudflare/worker/wrangler.local.toml
 cloudflare/worker/.dev.vars
+cloudflare/pages/.wrangler/

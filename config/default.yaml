@@ -38,5 +38,8 @@ paper:
   limit_check: true
 
 cloudflare:
-  worker_url: "http://127.0.0.1:8788"
+  # 生产：Cloudflare Pages Functions（同域 /api/*，国内可访问，已验证）
+  worker_url: "https://quant-board-9y2.pages.dev"
   push_interval_sec: 60
+  # 本地 wrangler dev 联调时改为 http://127.0.0.1:8788
+  dev_url: "http://127.0.0.1:8788"

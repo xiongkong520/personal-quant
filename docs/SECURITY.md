@@ -2,28 +2,27 @@
 
 > 2026-11-21 更新：按用户要求**取消 UA/Accept 白名单拦截**，人机验证（Turnstile）+ Cloudflare 边缘防护（自定义域名后的免费 WAF）为主；新增「国内访问」说明。
 
-## 0. 国内访问：`*.workers.dev` 不可用，必须自定义域名
+## 0. 国内访问：用 Cloudflare Pages（已验证可达）
 
 实测（国内网络）：
 - ❌ `https://personal-quant-worker.xiongkong520.workers.dev` → 空白/超时（该子域被阻断）
-- ✅ `www.cloudflare.com`、`pages.dev` 官网、`challenges.cloudflare.com`（Turnstile 组件）可达
+- ✅ `https://quant-board-9y2.pages.dev` → 正常（Pages 静态页 + Pages Functions 同域 API）
+- ✅ `www.cloudflare.com`、`challenges.cloudflare.com`（Turnstile 组件）可达
 
-**结论：网页要能在国内打开，必须给 Worker 绑定自定义域名（接入 Cloudflare 免费套餐）。**
-接入后可同时获得 CF 免费安全能力：Security Level、Bot Fight Mode、WAF 自定义规则、Rate Limiting。
+**当前生产方案**：整站部署在 Pages（`quant-board-9y2.pages.dev`），
+`cloudflare/pages/functions/api/[[path]].ts` 复用 Worker 实现，D1 / 密钥 / Turnstile 与 Worker 版一致。
+部署命令：`cd cloudflare/pages && ../worker/node_modules/.bin/wrangler pages deploy . --project-name quant-board --branch main`
 
-接入步骤（需你有一个域名）：
-1. Cloudflare Dashboard → **Add a site** → 填域名 → 选 **Free** 套餐 → 复制分配的两个 NS。
-2. 到域名注册商把 NS 改成 Cloudflare 的 NS，等待生效（几分钟～24h）。
-3. Workers & Pages → `personal-quant-worker` → Settings → **Domains & Routes** → Add **Custom Domain**（如 `quant.你的域名.com`）。
-4. 打开 **Security**：
-   - Settings → Security Level = **High**；Bot Fight Mode = **On**
-   - WAF → Custom rules（免费额度即可）：
-     - `(http.request.uri.path contains "/api/" and cf.threat_score gt 10)` → Managed Challenge
-     - `(http.request.uri.path contains "/api/ingest" and ip.src ne <你的固定出口IP>)` → Block
-   - Rate limiting：`/api/*` 每 IP 120 次/分钟 → Block 1 分钟（与 Worker 内限流叠加）
-5. 前端不变（页面用相对路径 `/api/...`，换域名自动生效）。
+**关于免费套餐防火墙（WAF）**：`*.pages.dev` 与 `*.workers.dev` 都不在 Cloudflare Zone 下，
+**无法配置 WAF 自定义规则 / Bot Fight Mode / Security Level**——这些能力需要把自定义域名接入 Cloudflare（Add a site，改 NS）。
+当前无域名时的安全层级 = **Turnstile 人机验证 + Worker 内限流（120/min）+ 安全响应头 + Cloudflare 网络层 DDoS 防护**。
 
-> 没有域名时：`*.pages.dev` 子域同样可能被阻断；`*.workers.dev` 已确认不可用。建议注册一个便宜域名（几元/年）接入 CF，这是国内可访问 + 免费 WAF 的唯一稳定路径。
+如果以后有域名（推荐，可解锁免费 WAF）：
+1. Cloudflare Dashboard → Add a site → 填域名 → Free 套餐 → 复制两个 NS。
+2. 到注册商把 NS 改成 Cloudflare 的，等待生效。
+3. Workers & Pages → `quant-board` → Custom domains 绑定 `quant.你的域名`。
+4. Security：Security Level = High、Bot Fight Mode = On；WAF 自定义规则与 Rate Limiting 见 §5。
+5. 前端不变（相对路径 `/api/...` 自动跟随域名）。
 
 ## 1. 威胁模型
 

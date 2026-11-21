@@ -24,5 +24,10 @@ npx wrangler d1 migrations apply personal_quant --remote
 # 3) 部署（Worker + Assets）
 npx wrangler deploy
 
-echo "[deploy] 完成。公网地址见上方输出。"
-echo "[deploy] 验证：BASE=<公网地址> bash scripts/security-test.sh"
+# 4) 部署 Pages（国内可访问的生产入口，静态页 + 同域 /api Functions）
+( cd ../pages && "../worker/node_modules/.bin/wrangler" pages deploy . --project-name quant-board --branch main --commit-dirty=true )
+
+echo "[deploy] 完成。"
+echo "[deploy] 生产看板：https://quant-board-9y2.pages.dev（国内可达）"
+echo "[deploy] 备用 Worker：https://personal-quant-worker.xiongkong520.workers.dev（国内被阻断）"
+echo "[deploy] 验证：BASE=https://quant-board-9y2.pages.dev bash scripts/security-test.sh"

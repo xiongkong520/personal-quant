@@ -1,11 +1,31 @@
-# Cloudflare Pages 产物（云端实时看板）
+# Cloudflare Pages 看板（生产：https://quant-board-9y2.pages.dev）
 
-由 Worker 静态挂载（`wrangler.toml [assets] directory = "../pages"`）：`/api/*` 走 Worker，其余路径返回本目录静态文件。
+同域部署：静态页 + Pages Functions（`functions/api/[[path]].ts` 复用 `../worker/src/index.ts`），
+`/api/*` 由 Functions 处理，其余路径由 Pages 静态托管。
+
+> 背景：`*.workers.dev` 在国内被阻断（空白/超时），`*.pages.dev` 实测可达（Via/浏览器已验证），
+> 所以国内访问入口用 Pages，Worker 版保留作备用/自定义域名方案。
+
+## 部署
+
+```bash
+cd cloudflare/pages
+../worker/node_modules/.bin/wrangler pages deploy . --project-name quant-board --branch main --commit-dirty=true
+```
+
+首次需创建项目与配置（已完成，记录备查）：
+- `wrangler pages project create quant-board --production-branch main`
+- D1 绑定 `DB → personal_quant`（Pages 项目 Settings → Functions → D1）
+- 环境变量 `TURNSTILE_SITEKEY`
+- Secrets：`COOKIE_KEY`、`TURNSTILE_SECRET`、`QUANT_INGEST_TOKEN`
+  （`wrangler pages secret put <NAME> --project-name quant-board`）
+- Turnstile 站点域名需包含 `quant-board-9y2.pages.dev`
 
 ## 文件
 
 - `index.html` —— 与 `frontend/index.html` 同构，差异只有：`window.QT_MODE="cloud"`、`<title>`、brand-sub、页脚数据来源、`foot.mode` 文案。
-- `styles.css`、`app.js` —— 与 `frontend/` 下同名文件**逐字节一致**（同一实现，按 `QT_MODE` 切换轮询/SSE）。
+- `styles.css`、`app.js` —— 与 `frontend/` 下同名文件**逐字节一致**（按 `QT_MODE` 切换轮询/SSE）。
+- `functions/api/[[path]].ts` —— Pages Functions 适配层，把 `/api/*` 交给 Worker 的 `fetch` 实现。
 
 修改后同步：
 
@@ -15,23 +35,14 @@ cp frontend/styles.css frontend/app.js cloudflare/pages/
 node --check cloudflare/pages/app.js
 ```
 
-## 本地预览（本机 workerd 不可用时的 node 回退）
+## 安全（当前无域名时的层级）
 
-```bash
-npm --prefix cloudflare/worker run dev:node   # → http://127.0.0.1:8788/
-```
+- Turnstile 人机验证：未通过 → `/api/signals`、`/api/stream`、`/api/model` 返回 401 `{"challenge":true}`
+- Worker 内限流：按 IP 120 次/分钟（429 + Retry-After）
+- 安全响应头：CSP、X-Frame-Options、Referrer-Policy 等
+- `*.pages.dev` 不在 Cloudflare Zone 下，**无法配置 WAF 自定义规则**；需要 WAF 时见 `../docs/SECURITY.md`（绑定自定义域名）
 
-首次访问流程：`GET /api/config` → 页面收到 401 `{"challenge":true}` → 弹 Turnstile 验证 →
-`POST /api/verify` 换 HttpOnly Cookie → 重试 `/api/signals` 并连 `/api/stream`（SSE）。
-本地测试 sitekey 为 Cloudflare 官方测试 key，Worker 内置 siteverify mock（任意 token 通过，`token=fail` 模拟失败）。
+## 数据流
 
-## 云端数据说明
-
-Worker 只提供 `/api/health`、`/api/config`、`/api/verify`、`/api/signals`、`/api/stream`、`/api/model`、`POST /api/ingest`。
-`/api/paper`、`/api/equity`、`/api/backtest` 属于本地 FastAPI，云端页面会渲染"本地生成"空态（命令提示），不发起跨端请求、不报错。
-
-## 安全与降级
-
-- 人机验证覆盖层、429 倒计时、SSE 指数退避重连与"顶部 2px 状态细条"均由 `app.js` 统一实现。
-- 唯一外部资源是 Turnstile 官方脚本（懒加载，仅挑战时请求）；其余样式/字体/图标全部内联或本地，断网仍可渲染空态。
-- 详细动效、无障碍、自测清单见 [`../frontend/README.md`](../frontend/README.md)。
+本地 Python（`python -m quant.cli export`，`cloudflare.worker_url` 指向本页地址）
+→ `POST /api/ingest`（x-ingest-token）→ D1 → 页面 SSE 实时更新。
