@@ -40,15 +40,28 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 
 def cmd_signal(args: argparse.Namespace) -> int:
+    from quant.data.store import init_db, write_signal
     from quant.model.predict import generate_signal
 
     cfg = load_config(args.config)
+    db = cfg_path(cfg, "data.db")
+    init_db(db)
     symbols = _symbols(args.symbols) if args.symbols else cfg["symbols"]
     signals = [generate_signal(s, cfg) for s in symbols]
+
+    # 落库：模拟盘（paper advance）只读 signals 表；单条失败不中断
+    written = 0
+    for sig in signals:
+        try:
+            write_signal(sig, db)
+            written += 1
+        except Exception as exc:  # noqa: BLE001 - 集成时容错
+            print(f"[warn] 信号落库失败 {sig.get('symbol')}: {exc}", file=sys.stderr)
+
     out = Path(args.out) if args.out else cfg_path(cfg, "data.dir") / "reports" / "signals.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(signals, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"count": len(signals), "out": str(out)}, ensure_ascii=False))
+    print(json.dumps({"count": len(signals), "written_to_db": written, "out": str(out)}, ensure_ascii=False))
     return 0
 
 
