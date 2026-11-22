@@ -125,6 +125,46 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_factors(args: argparse.Namespace) -> int:
+    from quant.factors.evaluation import evaluate_factors, render_markdown
+    from quant.factors.library import FACTOR_NAMES, compute_factors
+
+    cfg = load_config(args.config)
+    db = cfg_path(cfg, "data.db")
+    if args.symbols:
+        symbols = _symbols(args.symbols)
+    else:
+        parquet_dir = cfg_path(cfg, "data.dir") / "parquet" / "daily_bars"
+        symbols = sorted(p.name.split("=")[1] for p in parquet_dir.glob("symbol=*") if p.is_dir())
+    if not symbols:
+        print("[factors] 没有可用行情数据，先执行 fetch", file=sys.stderr)
+        return 2
+    from quant.data.store import read_daily_multi
+
+    daily = read_daily_multi(symbols, db, start=args.start, end=args.end)
+    if daily.empty:
+        print("[factors] 行情为空", file=sys.stderr)
+        return 2
+    frame = compute_factors(daily, horizon=args.horizon)
+    report = evaluate_factors(frame, FACTOR_NAMES, groups=args.groups)
+    report["symbols"] = len(symbols)
+    report["horizon"] = args.horizon
+    out_dir = Path(args.out).parent if args.out else cfg_path(cfg, "data.dir") / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = Path(args.out) if args.out else out_dir / "factor_eval.json"
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    md_path = json_path.with_suffix(".md")
+    md_path.write_text(render_markdown(report), encoding="utf-8")
+    print(json.dumps({
+        "symbols": len(symbols),
+        "n_samples": report["n_samples"],
+        "n_dates": report["n_dates"],
+        "top_factors": report["ranked"][:8],
+        "out": str(json_path),
+    }, ensure_ascii=False))
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     from quant.backtest.engine import run_backtest
 
@@ -184,6 +224,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--symbols", default=None)
     s.add_argument("--out", default=None)
     s.set_defaults(func=cmd_signal)
+
+    fa = sub.add_parser("factors", help="因子评估：IC/RankIC/ICIR/分层回测")
+    fa.add_argument("--symbols", default=None)
+    fa.add_argument("--start", default="2024-01-01")
+    fa.add_argument("--end", default=None)
+    fa.add_argument("--horizon", type=int, default=1)
+    fa.add_argument("--groups", type=int, default=5)
+    fa.add_argument("--out", default=None)
+    fa.set_defaults(func=cmd_factors)
 
     ev = sub.add_parser("events", help="重大事件：利好/利空评分")
     ev.add_argument("--limit", type=int, default=60)
