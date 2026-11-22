@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "asof": "2026-11-22T13:59:41+08:00",
+  "trade_date": "2026-11-20",
+  "status": "ok",
+  "errors": [],
+  "indices": [
+    {
+      "code": "sh000001",
+      "name": "上证指数",
+      "price": 3533.79,
+      "pct_chg": -1.23,
+      "direction": "down",
+      "prob": {
+        "up": 0.0117,
+        "flat": 0.1018,
+        "down": 0.8866
+      },
+      "confidence": 0.8866,
+      "ma_state": "空头排列"
+    },
+    {
+      "code": "sz399001",
+      "name": "深证成指",
+      "price": 10256.39,
+      "pct_chg": -3.09,
+      "direction": "down",
+      "prob": {
+        "up": 0.0117,
+        "flat": 0.1018,
+        "down": 0.8866
+      },
+      "confidence": 0.8866,
+      "ma_state": "空头排列"
+    },
+    {
+      "code": "sz399006",
+      "name": "创业板指",
+      "price": 2212.13,
+      "pct_chg": -3.54,
+      "direction": "down",
+      "prob": {
+        "up": 0.0117,
+        "flat": 0.1018,
+        "down": 0.8866
+      },
+      "confidence": 0.8866,
+      "ma_state": "空头排列"
+    },
+    {
+      "code": "sh000300",
+      "name": "沪深300",
+      "price": 3954.57,
+      "pct_chg": -0.76,
+      "direction": "down",
+      "prob": {
+        "up": 0.0117,
+        "flat": 0.1018,
+        "down": 0.8866
+      },
+      "confidence": 0.8866,
+      "ma_state": "空头排列"
+    }
+  ],
+  "activity": {
+    "up": 297,
+    "down": 4897,
+    "flat": 22,
+    "suspended": 8,
+    "limit_up": 30,
+    "limit_down": 68,
+    "active_pct": 5.69,
+    "asof": "2026-11-20 15:00:00"
+  },
+  "sentiment": {
+    "score": 19.6,
+    "state": "ice",
+    "label": "冰点",
+    "breadth": 0.0572,
+    "limit_ratio": 0.3061,
+    "active_pct": 5.69
+  },
+  "market_direction": {
+    "direction": "down",
+    "prob": {
+      "up": 0.0117,
+      "flat": 0.1018,
+      "down": 0.8866
+    },
+    "confidence": 0.8866
+  }
+}
