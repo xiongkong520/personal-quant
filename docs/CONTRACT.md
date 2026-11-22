@@ -24,7 +24,17 @@
 
 每人只改自己目录 + 自己的 `tests/test_<模块>.py`；**不要动别人的文件，不要改 `config/default.yaml` 的结构**（可新增键，需在 `config/schema.md` 记录）。
 
-## 3. 数据契约（SQLite，路径 `data/db/quant.db`）
+## 3. 数据契约（行情 Parquet + 状态 DuckDB）
+
+| 数据类别 | 存储 | 路径 |
+|---|---|---|
+| 行情（daily_bars / minute_bars） | Parquet 文件（列式、压缩） | `data/parquet/daily_bars/symbol=<code>/daily_bars.parquet`、`data/parquet/minute_bars/symbol=<code>/period=<p>/minute_bars.parquet` |
+| 状态（signals、paper_*） | DuckDB 单库 | `data/db/quant.duckdb` |
+
+- 行情查询：DuckDB `read_parquet()`（单票直接读文件；多票用 glob/hive 分区）；写入走「读旧文件 + 合并去重 + 原子替换（tmp + os.replace）」。
+- 旧 SQLite 库可用 `python scripts/migrate_storage.py` 迁移（逐表行数校验、幂等）。
+- 云端 D1 仍为 SQLite（Cloudflare 托管），本地/云端通过信号 JSON 契约解耦，互不影响。
+- 旧版 SQLite 路径 `data/db/quant.db` 仅作迁移输入保留。
 
 ### 3.1 `daily_bars`（日线，不复权价 + 前复权列）
 

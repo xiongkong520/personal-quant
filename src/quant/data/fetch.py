@@ -535,7 +535,7 @@ def sync_daily(
     end: str,
     cfg: dict,
 ) -> dict[str, int]:
-    """批量同步日线到 SQLite（幂等），返回 ``{symbol: 写入行数}``。
+    """批量同步日线到 Parquet 行情库（幂等 upsert），返回 ``{symbol: 写入行数}``。
 
     单个 symbol 失败只记 0 并 warning，不中断整体（契约 §11）。
     """
@@ -738,7 +738,7 @@ def fetch_minute(
 
 
 def sync_minute(symbols: list[str], period: int, cfg: dict) -> dict[str, int]:
-    """同步最近窗口的分钟线到 SQLite（幂等），返回 ``{symbol: 写入行数}``。"""
+    """同步最近窗口的分钟线到 Parquet 行情库（幂等 upsert），返回 ``{symbol: 写入行数}``。"""
     cfg = cfg or {}
     db = _db_path(cfg)
     init_db(db)

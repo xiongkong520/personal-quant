@@ -1,9 +1,10 @@
-"""存储层离线单测：建表/索引、幂等 UPSERT、读取、信号读写（契约 §3、§9）。"""
+"""存储层离线单测：Parquet 行情 + DuckDB 状态库、幂等 UPSERT、读取、信号读写（契约 §3、§9）。"""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -25,43 +26,96 @@ def _minute_frame() -> pd.DataFrame:
 
 @pytest.fixture()
 def db(tmp_path: Path) -> Path:
-    path = tmp_path / "quant.db"
+    """DuckDB 状态库文件（行情 Parquet 由其位置推导到 ``tmp_path/parquet``）。"""
+    path = tmp_path / "quant.duckdb"
     store.init_db(path)
     return path
+
+
+def _parquet_daily_file(db: Path, symbol: str = "600519") -> Path:
+    return store.parquet_root(db) / "daily_bars" / f"symbol={symbol}" / "daily_bars.parquet"
+
+
+def _parquet_minute_file(db: Path, symbol: str = "600519", period: int = 5) -> Path:
+    return (
+        store.parquet_root(db)
+        / "minute_bars"
+        / f"symbol={symbol}"
+        / f"period={period}"
+        / "minute_bars.parquet"
+    )
 
 
 # ---------------------------------------------------------------------------
 # 建表
 # ---------------------------------------------------------------------------
-def test_init_db_creates_contract_tables_and_indexes(db: Path):
-    tables = set(store.get_table_names(db))
-    assert {"daily_bars", "minute_bars", "signals"} <= tables
-
-    import sqlite3
-
-    con = sqlite3.connect(db)
-    try:
+def test_init_db_creates_state_tables_parquet_dirs_and_indexes(db: Path):
+    # 状态库：DuckDB signals 表 + 索引
+    assert "signals" in store.get_table_names(db)
+    with store.connect(db) as con:
         indexes = {
-            r[0]
-            for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
-            ).fetchall()
+            row["index_name"]
+            for row in con.execute(
+                "SELECT index_name FROM duckdb_indexes() WHERE table_name='signals'"
+            ).fetch_df().to_dict("records")
         }
-    finally:
-        con.close()
     assert {
-        "idx_daily_trade_date",
-        "idx_daily_symbol",
-        "idx_minute_ts",
         "idx_signals_symbol_asof",
         "idx_signals_trade_date",
+        "idx_signals_status",
     } <= indexes
+    # 行情目录（Parquet 根 + 两张逻辑行情表目录）
+    root = store.parquet_root(db)
+    assert (root / "daily_bars").is_dir()
+    assert (root / "minute_bars").is_dir()
 
 
 def test_init_db_is_idempotent(db: Path):
     store.init_db(db)
     store.init_db(db)
-    assert "daily_bars" in store.get_table_names(db)
+    assert "signals" in store.get_table_names(db)
+
+
+def test_parquet_layout_and_duckdb_read_parquet(db: Path):
+    """行情落到契约目录，且能用 DuckDB read_parquet 直接查询。"""
+    store.upsert_daily(_daily_frame(), db)
+    path = _parquet_daily_file(db)
+    assert path.is_file(), "日线应写成 daily_bars/symbol=<code>/daily_bars.parquet"
+    assert str(path).endswith("symbol=600519/daily_bars.parquet")
+
+    con = duckdb.connect()
+    try:
+        # 目录名是 hive 风格的 symbol=600519；文件本身已带 symbol 列，显式关闭
+        # hive_partitioning，避免 DuckDB 把目录名推断成整数分区列。
+        rows = con.execute(
+            "SELECT symbol, trade_date, close FROM read_parquet(?, hive_partitioning=false)"
+            " ORDER BY trade_date",
+            [str(path)],
+        ).fetchall()
+    finally:
+        con.close()
+    assert len(rows) == 4
+    assert rows[0][0] == "600519" and rows[0][1] == "2024-01-02"
+
+    store.upsert_minute(_minute_frame(), db)
+    mpath = _parquet_minute_file(db)
+    assert mpath.is_file(), "分钟线应写成 minute_bars/symbol=<code>/period=<p>/minute_bars.parquet"
+    assert store.get_storage_tables(db) == ["daily_bars", "minute_bars", "signals"]
+
+
+def test_parquet_upsert_keeps_other_dates_and_replaces_new_values(db: Path):
+    """增量 upsert 只覆盖重叠主键，不丢旧行（保留新值）。"""
+    frame = _daily_frame()
+    store.upsert_daily(frame.iloc[:2], db)
+    changed = frame.iloc[1:3].copy()
+    changed.loc[:, "close"] = 1234.5
+    store.upsert_daily(changed, db)
+    out = store.read_daily("600519", db)
+    assert len(out) == 3
+    by_date = out.set_index("trade_date")["close"]
+    assert by_date["2024-01-02"] == 1700.0  # 旧行未被改动
+    assert by_date["2024-01-03"] == 1234.5  # 重叠行保留新值
+    assert by_date["2024-01-04"] == 1234.5
 
 
 # ---------------------------------------------------------------------------
@@ -266,3 +320,35 @@ def test_write_signal_confidence_follows_max_prob(db: Path):
     store.write_signal(_signal(confidence=0.99), db)
     got = store.read_signals(db)[0]
     assert got["confidence"] == 0.42  # 契约：confidence = max(prob)，保留 4 位
+
+
+# ---------------------------------------------------------------------------
+# DuckDB 连接层：只读语义 / 锁冲突重试（data/db.py）
+# ---------------------------------------------------------------------------
+def test_readonly_connect_rejects_missing_file(tmp_path: Path):
+    from quant.data import db as dbmod
+
+    with pytest.raises(FileNotFoundError):
+        with dbmod.connect(tmp_path / "missing.duckdb", read_only=True):
+            pass
+
+
+def test_connect_retries_on_lock_conflict(tmp_path: Path, monkeypatch):
+    from quant.data import db as dbmod
+
+    path = tmp_path / "quant.duckdb"
+    calls = {"n": 0}
+    real_open = dbmod._open
+
+    def flaky_open(p, read_only):
+        calls["n"] += 1
+        if calls["n"] < 3:  # 前两次模拟「其它进程持锁」
+            raise duckdb.IOException(
+                f'Could not set lock on file "{p}": Conflicting lock is held'
+            )
+        return real_open(p, read_only)
+
+    monkeypatch.setattr(dbmod, "_open", flaky_open)
+    with dbmod.connect(path, attempts=3) as con:
+        assert con.execute("SELECT 1").fetchall() == [(1,)]
+    assert calls["n"] == 3

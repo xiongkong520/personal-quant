@@ -4,9 +4,9 @@
 ----
 1. 生成与契约 §3.1 字段完全一致的合成日线 CSV（``synthetic_daily.csv``），
    供特征 / 模型 / 回测测试使用；
-2. 提供 ``write_daily_db(df, db_path)`` 把合成日线写成本地 SQLite 库，
-   这样在真实 ``data/db/quant.db`` 就绪前也能把 train / backtest / signal
-   全链路跑通。
+2. 提供 ``write_daily_db(df, db_path)`` 把合成日线写成本地 **Parquet 行情 + DuckDB
+   状态库**（``db_path`` 是 DuckDB 文件，行情落在其推导出的 Parquet 目录），
+   这样在真实 ``data/parquet`` 就绪前也能把 train / backtest / signal 全链路跑通。
 
 设计要点
 --------
@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import math
-import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -233,35 +232,25 @@ def load_fixture_csv(path: Path | None = None) -> pd.DataFrame:
 
 
 def write_daily_db(df: pd.DataFrame, db_path: str | Path) -> Path:
-    """把日线 DataFrame 写成契约 §3.1 的 SQLite ``daily_bars`` 表。"""
-    db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-    cols = ", ".join(DAILY_COLUMNS)
-    placeholders = ", ".join("?" for _ in DAILY_COLUMNS)
-    ddl = f"""
-    CREATE TABLE daily_bars (
-        symbol TEXT NOT NULL, trade_date TEXT NOT NULL,
-        open REAL, high REAL, low REAL, close REAL, pre_close REAL,
-        volume INTEGER, amount REAL, pct_chg REAL, turnover_rate REAL,
-        adj_factor REAL DEFAULT 1.0, adj_close REAL,
-        limit_up REAL, limit_down REAL, is_suspended INTEGER DEFAULT 0,
-        PRIMARY KEY (symbol, trade_date)
-    );
+    """把日线 DataFrame 写成契约 §3.1 的 Parquet 行情（``db_path`` 为 DuckDB 状态库路径）。
+
+    行情落在 ``quant.data.store.parquet_root(db_path)`` 推导出的目录：
+    ``<root>/daily_bars/symbol=<code>/daily_bars.parquet``。
     """
-    records = [
-        tuple(None if pd.isna(v) else (int(v) if isinstance(v, (np.integer,)) else float(v) if isinstance(v, (np.floating,)) else v)
-              for v in row)
-        for row in df[DAILY_COLUMNS].itertuples(index=False, name=None)
-    ]
-    with sqlite3.connect(db_path) as con:
-        con.execute(ddl)
-        con.executemany(
-            f"INSERT INTO daily_bars ({cols}) VALUES ({placeholders})", records
-        )
-        con.commit()
-    return db_path
+    from quant.data import store  # 延迟导入：本文件被 importlib 直接加载时也可用
+
+    target = Path(db_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+    root = store.parquet_root(target)
+    if root.exists():
+        import shutil
+
+        shutil.rmtree(root, ignore_errors=True)
+    store.init_db(target)
+    store.upsert_daily(df[DAILY_COLUMNS], target)
+    return target
 
 
 GENERATED_DIR = FIXTURE_DIR / ".generated"
@@ -269,7 +258,7 @@ SYNTH_DB_PATH = GENERATED_DIR / "quant_synth.db"
 
 
 def make_synth_db(df: pd.DataFrame | None = None, path: Path | None = None) -> Path:
-    """把合成日线写成 SQLite 库，供 ``synth_config.yaml`` 的 CLI 全链路自测使用。"""
+    """把合成日线写成 Parquet 行情 + DuckDB 状态库，供 ``synth_config.yaml`` 的 CLI 全链路自测使用。"""
     frame = make_daily() if df is None else df
     target = Path(path) if path is not None else SYNTH_DB_PATH
     write_daily_db(frame, target)
@@ -277,7 +266,7 @@ def make_synth_db(df: pd.DataFrame | None = None, path: Path | None = None) -> P
 
 
 def main() -> None:
-    """生成并保存合成日线 CSV + 合成 SQLite 库（开发时手动跑一次即可）。"""
+    """生成并保存合成日线 CSV + 合成 Parquet 行情库（开发时手动跑一次即可）。"""
     df = make_daily()
     df.to_csv(CSV_PATH, index=False)
     db = make_synth_db(df)

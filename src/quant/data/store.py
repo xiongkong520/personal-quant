@@ -1,7 +1,19 @@
-"""SQLite 存储层：建表、幂等 UPSERT、读取（契约 §3、§9）。
+"""本地存储层（契约 §3、§9）：**Parquet 存行情 + DuckDB 做查询/状态库**。
 
-数据库路径默认 ``data/db/quant.db``，由 CLI 通过 ``config.cfg_path(cfg, "data.db")``
-解析后传入。所有写操作幂等：重复抓同一段行情不会产生重复行。
+存储布局
+--------
+- 行情（只追加/幂等 UPSERT，不进 DuckDB）：
+
+  - ``data/parquet/daily_bars/symbol=<code>/daily_bars.parquet``（契约 §3.1）
+  - ``data/parquet/minute_bars/symbol=<code>/period=<p>/minute_bars.parquet``（§3.2）
+
+- 状态（``signals``，以及 paper 模块自行管理的 ``paper_*`` 表）：
+
+  - ``data/db/quant.duckdb``（配置键 ``data.db``）
+
+Parquet 根目录默认由 DuckDB 路径推导：``.../db/quant.duckdb`` → ``.../parquet``；
+其它位置（如测试临时库 ``tmp/quant.db``）→ ``tmp/parquet``。也可用环境变量
+``QUANT_PARQUET_DIR`` 显式覆盖，便于迁移脚本/自定义配置。
 
 对外签名（契约 §9，实现方不得改名）::
 
@@ -14,19 +26,24 @@
     write_signal(sig, db_path) -> None
     read_signals(db_path, limit=200) -> list[dict]
     read_latest_signals(db_path, symbols) -> list[dict]
+
+返回结构（列名/列顺序/dtype/排序、信号 dict 字段）与旧 SQLite 实现保持一致。
 """
 from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-from contextlib import contextmanager
-from datetime import datetime, timedelta
+import os
+from contextlib import AbstractContextManager
+from datetime import timedelta
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable
 
+import duckdb
 import pandas as pd
 
+from quant.data import db as duckdb_conn
+from quant.data import parquet_store
 from quant.data.models import (
     DAILY_COLUMNS,
     DIRECTIONS,
@@ -45,57 +62,31 @@ from quant.data.models import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# DDL（契约 §3.1 / §3.2 / §3.3）
-# ---------------------------------------------------------------------------
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS daily_bars (
-    symbol        TEXT    NOT NULL,
-    trade_date    TEXT    NOT NULL,
-    open          REAL,
-    high          REAL,
-    low           REAL,
-    close         REAL,
-    pre_close     REAL,
-    volume        INTEGER,
-    amount        REAL,
-    pct_chg       REAL,
-    turnover_rate REAL    DEFAULT 0,
-    adj_factor    REAL    DEFAULT 1.0,
-    adj_close     REAL,
-    limit_up      REAL,
-    limit_down    REAL,
-    is_suspended  INTEGER DEFAULT 0,
-    PRIMARY KEY (symbol, trade_date)
-);
-CREATE INDEX IF NOT EXISTS idx_daily_trade_date ON daily_bars(trade_date);
-CREATE INDEX IF NOT EXISTS idx_daily_symbol ON daily_bars(symbol);
+#: Parquet 根目录环境变量（迁移脚本 / 自定义 data.parquet_dir 时用）
+PARQUET_DIR_ENV = "QUANT_PARQUET_DIR"
 
-CREATE TABLE IF NOT EXISTS minute_bars (
-    symbol TEXT    NOT NULL,
-    period INTEGER NOT NULL,
-    ts     TEXT    NOT NULL,
-    open   REAL,
-    high   REAL,
-    low    REAL,
-    close  REAL,
-    volume INTEGER,
-    amount REAL,
-    PRIMARY KEY (symbol, period, ts)
-);
-CREATE INDEX IF NOT EXISTS idx_minute_ts ON minute_bars(ts);
+# ---------------------------------------------------------------------------
+# DuckDB 状态库 DDL（契约 §3.3；行情表在 Parquet 里，不建 DuckDB 表）
+# ---------------------------------------------------------------------------
+#: DuckDB 2.x 里 ``asof`` 是保留字（AS OF），建表/查询/写入统一加双引号。
+def _q(column: str) -> str:
+    return f'"{column}"'
 
+
+_SIGNAL_COLUMNS_SQL = ", ".join(_q(c) for c in SIGNAL_COLUMNS)
+
+_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS signals (
     signal_id       TEXT PRIMARY KEY,
     symbol          TEXT NOT NULL,
-    asof            TEXT NOT NULL,
+    {_q("asof")}            TEXT NOT NULL,
     trade_date      TEXT NOT NULL,
-    price           REAL,
+    price           DOUBLE,
     direction       TEXT,
-    prob_up         REAL,
-    prob_flat       REAL,
-    prob_down       REAL,
-    confidence      REAL,
+    prob_up         DOUBLE,
+    prob_flat       DOUBLE,
+    prob_down       DOUBLE,
+    confidence      DOUBLE,
     horizon         TEXT,
     expires_at      TEXT,
     model_version   TEXT,
@@ -104,148 +95,127 @@ CREATE TABLE IF NOT EXISTS signals (
     status          TEXT,
     created_at      TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_signals_symbol_asof ON signals(symbol, asof);
+CREATE INDEX IF NOT EXISTS idx_signals_symbol_asof ON signals(symbol, {_q("asof")});
 CREATE INDEX IF NOT EXISTS idx_signals_trade_date ON signals(trade_date);
 CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
 """
 
-_TABLES = ("daily_bars", "minute_bars", "signals")
+# ---------------------------------------------------------------------------
+# 路径解析
+# ---------------------------------------------------------------------------
+def _configured_parquet_root(db_path: Path) -> Path | None:
+    """若 ``db_path`` 正是 config 里的 ``data.db``，优先用 ``data.parquet_dir``。"""
+    try:
+        from quant.config import cfg_path, load_config  # noqa: PLC0415 - 避免模块级循环导入
+
+        cfg = load_config()
+        configured = (cfg.get("data") or {}).get("parquet_dir")
+        if not configured:
+            return None
+        if Path(cfg_path(cfg, "data.db")).resolve() != db_path.resolve():
+            return None
+        return Path(cfg_path(cfg, "data.parquet_dir"))
+    except Exception:  # noqa: BLE001 - 配置缺失/路径异常时退回约定推导
+        return None
+
+
+def parquet_root(db_path: str | Path) -> Path:
+    """Parquet 根目录：环境变量 > config ``data.parquet_dir`` > 由 db 路径约定推导。
+
+    - ``QUANT_PARQUET_DIR``（迁移脚本/多环境显式指定）优先；
+    - 当 ``db_path`` 就是 config 里的 ``data.db`` 时，用 ``data.parquet_dir``
+      （默认 ``data/parquet``）；
+    - 否则按约定：``.../db/quant.duckdb`` → ``.../parquet``，其它 ``db.parent/parquet``
+      （临时库测试即落 ``tmp/parquet``，互不干扰）。
+    """
+    env = os.environ.get(PARQUET_DIR_ENV)
+    if env:
+        return Path(env)
+    db = Path(db_path)
+    configured = _configured_parquet_root(db)
+    if configured is not None:
+        return configured
+    if db.parent.name in ("db", "database"):
+        return db.parent.parent / "parquet"
+    return db.parent / "parquet"
+
+
+def ensure_parquet_dirs(db_path: str | Path) -> Path:
+    """建 ``daily_bars/`` 与 ``minute_bars/`` 目录（``init_db``/upsert 调用）。"""
+    return parquet_store.ensure_dirs(parquet_root(db_path))
 
 
 # ---------------------------------------------------------------------------
 # 连接与建表
 # ---------------------------------------------------------------------------
-@contextmanager
-def connect(db_path: str | Path) -> Iterator[sqlite3.Connection]:
-    """打开 SQLite 连接（自动建父目录），成功提交、异常回滚。"""
-    path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(path), timeout=30.0)
-    con.row_factory = sqlite3.Row
-    try:
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA busy_timeout=30000")
-        con.execute("PRAGMA synchronous=NORMAL")
-        yield con
-        con.commit()
-    except Exception:
-        con.rollback()
-        raise
-    finally:
-        con.close()
+def connect(
+    db_path: str | Path, read_only: bool = False
+) -> AbstractContextManager[duckdb.DuckDBPyConnection]:
+    """``quant.data.db.connect`` 的别名（连接为原生 DuckDB 连接，支持 ? / executemany / .df()）。"""
+    return duckdb_conn.connect(db_path, read_only=read_only)
 
 
 def init_db(db_path: str | Path) -> None:
-    """创建 §3.1–§3.3 三张表及索引；可重复调用（IF NOT EXISTS）。"""
-    with connect(db_path) as con:
-        con.executescript(_SCHEMA_SQL)
+    """建 DuckDB ``signals`` 表/索引 + Parquet 目录；可重复调用（幂等）。"""
+    path = Path(db_path)
+    ensure_parquet_dirs(path)
+    with duckdb_conn.connect(path) as con:
+        con.execute(_SCHEMA_SQL)
 
 
 def get_table_names(db_path: str | Path) -> list[str]:
-    """列出库内用户表（测试/排查用）。"""
-    with connect(db_path) as con:
-        rows = con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
-    return [r["name"] for r in rows]
+    """列出 DuckDB 状态库里的表（测试/排查用；行情表在 Parquet 里）。"""
+    path = Path(db_path)
+    try:
+        with duckdb_conn.connect(path, read_only=True) as con:
+            return duckdb_conn.table_names(con)
+    except (FileNotFoundError, duckdb_conn.DatabaseUnavailable, duckdb.Error, OSError):
+        return []
+
+
+def get_storage_tables(db_path: str | Path) -> list[str]:
+    """逻辑表清单：Parquet 行情表（有落地文件时）+ DuckDB 状态表。"""
+    names = set(get_table_names(db_path))
+    root = parquet_root(db_path)
+    if any(parquet_store.daily_dir(root).glob("symbol=*")):
+        names.add("daily_bars")
+    if any(parquet_store.minute_dir(root).glob("symbol=*/period=*")):
+        names.add("minute_bars")
+    return sorted(names)
 
 
 # ---------------------------------------------------------------------------
-# 幂等 UPSERT
+# 幂等 UPSERT（行情 → Parquet）
 # ---------------------------------------------------------------------------
-def _upsert_sql(table: str, columns: tuple[str, ...], pk: tuple[str, ...]) -> str:
-    cols = ", ".join(columns)
-    marks = ", ".join("?" for _ in columns)
-    updates = ", ".join(f"{c}=excluded.{c}" for c in columns if c not in pk)
-    return (
-        f"INSERT INTO {table} ({cols}) VALUES ({marks}) "
-        f"ON CONFLICT({', '.join(pk)}) DO UPDATE SET {updates}"
-    )
-
-
-_DAILY_UPSERT = _upsert_sql("daily_bars", DAILY_COLUMNS, ("symbol", "trade_date"))
-_MINUTE_UPSERT = _upsert_sql("minute_bars", MINUTE_COLUMNS, ("symbol", "period", "ts"))
-_SIGNAL_UPSERT = _upsert_sql("signals", SIGNAL_COLUMNS, ("signal_id",))
-
-
 def upsert_daily(df: pd.DataFrame, db_path: str | Path) -> int:
-    """幂等写入日线，返回本次提交的行数（= len(df)）。"""
-    init_db(db_path)
+    """幂等写入日线（合并进每票 Parquet），返回本次提交的行数（= len(df)）。"""
     frame = normalize_daily(df)
-    rows = frame[list(DAILY_COLUMNS)].itertuples(index=False, name=None)
-    payload = [tuple(_native(v) for v in row) for row in rows]
-    with connect(db_path) as con:
-        con.executemany(_DAILY_UPSERT, payload)
-    return len(payload)
+    root = parquet_root(db_path)
+    if frame.empty:
+        parquet_store.ensure_dirs(root)
+        return 0
+    parquet_store.write_daily(root, frame)
+    return len(frame)
 
 
 def upsert_minute(df: pd.DataFrame, db_path: str | Path) -> int:
-    """幂等写入分钟线，返回本次提交的行数。"""
-    init_db(db_path)
+    """幂等写入分钟线（合并进 symbol×period Parquet），返回本次提交的行数。"""
     frame = normalize_minute(df)
-    rows = frame[list(MINUTE_COLUMNS)].itertuples(index=False, name=None)
-    payload = [tuple(_native(v) for v in row) for row in rows]
-    with connect(db_path) as con:
-        con.executemany(_MINUTE_UPSERT, payload)
-    return len(payload)
-
-
-def _native(value: Any) -> Any:
-    """pandas / numpy 标量 → sqlite3 可写原生类型。"""
-    if value is None or value is pd.NaT:
-        return None
-    if isinstance(value, float) and pd.isna(value):
-        return None
-    # pandas 3 的字符串列可能给 str 子类，统一转 Python str
-    if isinstance(value, str):
-        return str(value)
-    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
-        try:
-            return value.item()
-        except (ValueError, AttributeError):
-            pass
-    return value
+    root = parquet_root(db_path)
+    if frame.empty:
+        parquet_store.ensure_dirs(root)
+        return 0
+    parquet_store.write_minute(root, frame)
+    return len(frame)
 
 
 # ---------------------------------------------------------------------------
-# 日线 / 分钟线读取
+# 日线 / 分钟线读取（DuckDB read_parquet）
 # ---------------------------------------------------------------------------
-def _date_bounds(
-    start: str | None, end: str | None
-) -> tuple[str | None, str | None]:
-    def _norm(value: str | None) -> str | None:
-        if value is None or str(value).strip() == "":
-            return None
-        return pd.Timestamp(str(value).strip()).strftime("%Y-%m-%d")
-
-    return _norm(start), _norm(end)
-
-
-def _daily_where(
-    symbols: Iterable[str], start: str | None, end: str | None
-) -> tuple[str, list[Any]]:
-    syms = [str(s).strip().zfill(6) for s in symbols if str(s).strip()]
-    clauses: list[str] = []
-    params: list[Any] = []
-    if syms:
-        clauses.append(f"symbol IN ({', '.join('?' for _ in syms)})")
-        params.extend(syms)
-    s_start, s_end = _date_bounds(start, end)
-    if s_start:
-        clauses.append("trade_date >= ?")
-        params.append(s_start)
-    if s_end:
-        clauses.append("trade_date <= ?")
-        params.append(s_end)
-    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    return where, params
-
-
 def _coerce_daily_read(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or len(df) == 0:
         return empty_daily()
-    out = normalize_daily(df)
-    return out[list(DAILY_COLUMNS)]
+    return normalize_daily(df)[list(DAILY_COLUMNS)]
 
 
 def _coerce_minute_read(df: pd.DataFrame) -> pd.DataFrame:
@@ -261,12 +231,8 @@ def read_daily(
     end: str | None = None,
 ) -> pd.DataFrame:
     """读单只股票日线，按 ``trade_date`` 升序；无数据返回带列的空表。"""
-    where, params = _daily_where([symbol], start, end)
-    with connect(db_path) as con:
-        df = pd.read_sql_query(
-            f"SELECT {', '.join(DAILY_COLUMNS)} FROM daily_bars{where}", con, params=params
-        )
-    return _coerce_daily_read(df)
+    frame = parquet_store.read_daily(parquet_root(db_path), symbol, start=start, end=end)
+    return _coerce_daily_read(frame)
 
 
 def read_daily_multi(
@@ -278,12 +244,10 @@ def read_daily_multi(
     """读多只股票日线，按 ``(symbol, trade_date)`` 升序。"""
     if not symbols:
         return empty_daily()
-    where, params = _daily_where(symbols, start, end)
-    with connect(db_path) as con:
-        df = pd.read_sql_query(
-            f"SELECT {', '.join(DAILY_COLUMNS)} FROM daily_bars{where}", con, params=params
-        )
-    return _coerce_daily_read(df)
+    frame = parquet_store.read_daily_multi(
+        parquet_root(db_path), symbols, start=start, end=end
+    )
+    return _coerce_daily_read(frame)
 
 
 def read_minute(
@@ -297,26 +261,30 @@ def read_minute(
 
     ``start`` / ``end`` 接受 ``YYYY-MM-DD`` 或 ``YYYY-MM-DD HH:MM``。
     """
-    clauses = ["symbol = ?", "period = ?"]
-    params: list[Any] = [str(symbol).strip().zfill(6), int(period)]
-    if start:
-        clauses.append("ts >= ?")
-        params.append(pd.Timestamp(str(start)).strftime("%Y-%m-%d %H:%M"))
-    if end:
-        clauses.append("ts <= ?")
-        params.append(pd.Timestamp(str(end)).strftime("%Y-%m-%d %H:%M"))
-    sql = (
-        f"SELECT {', '.join(MINUTE_COLUMNS)} FROM minute_bars "
-        f"WHERE {' AND '.join(clauses)} ORDER BY ts ASC"
+    frame = parquet_store.read_minute(
+        parquet_root(db_path), symbol, period, start=start, end=end
     )
-    with connect(db_path) as con:
-        df = pd.read_sql_query(sql, con, params=params)
-    return _coerce_minute_read(df)
+    return _coerce_minute_read(frame)
 
 
 # ---------------------------------------------------------------------------
-# 信号写入 / 读取（契约 §3.3、§4）
+# 信号写入 / 读取（DuckDB 状态库；契约 §3.3、§4）
 # ---------------------------------------------------------------------------
+def _upsert_sql(table: str, columns: tuple[str, ...], pk: tuple[str, ...]) -> str:
+    cols = ", ".join(_q(c) for c in columns)
+    marks = ", ".join("?" for _ in columns)
+    updates = ", ".join(
+        f"{_q(c)}=excluded.{_q(c)}" for c in columns if c not in pk
+    )
+    return (
+        f"INSERT INTO {table} ({cols}) VALUES ({marks}) "
+        f"ON CONFLICT({', '.join(_q(c) for c in pk)}) DO UPDATE SET {updates}"
+    )
+
+
+_SIGNAL_UPSERT = _upsert_sql("signals", SIGNAL_COLUMNS, ("signal_id",))
+
+
 def _signal_id_of(sig: dict[str, Any], asof: str) -> str:
     raw = sig.get("signal_id")
     if raw:
@@ -458,15 +426,16 @@ def _prepare_signal(sig: dict[str, Any]) -> dict[str, Any]:
 
 def write_signal(sig: dict, db_path: str | Path) -> None:
     """幂等写入一条信号（同 signal_id 覆盖更新）。"""
-    init_db(db_path)
+    path = Path(db_path)
     prepared = _prepare_signal(sig)
-    payload = tuple(prepared[col] for col in SIGNAL_COLUMNS)
-    with connect(db_path) as con:
+    payload = [prepared[col] for col in SIGNAL_COLUMNS]
+    init_db(path)
+    with duckdb_conn.connect(path) as con:
         con.execute(_SIGNAL_UPSERT, payload)
 
 
-def _row_to_signal(row: sqlite3.Row) -> dict[str, Any]:
-    data = {col: row[col] for col in SIGNAL_COLUMNS}
+def _row_to_signal(row: dict[str, Any]) -> dict[str, Any]:
+    data = {col: row.get(col) for col in SIGNAL_COLUMNS}
     raw = data.get("top_features")
     if isinstance(raw, str) and raw:
         try:
@@ -478,18 +447,31 @@ def _row_to_signal(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
+def _query_signals(
+    db_path: str | Path, sql: str, params: Iterable[Any] = ()
+) -> list[dict[str, Any]]:
+    """只读查询 signals 表；库/表不存在或暂时被锁定时返回 []（API 容错）。"""
+    path = Path(db_path)
+    try:
+        with duckdb_conn.connect(path, read_only=True) as con:
+            if not duckdb_conn.table_exists(con, "signals"):
+                return []
+            return duckdb_conn.fetch_dicts(con, sql, list(params))
+    except (FileNotFoundError, duckdb_conn.DatabaseUnavailable, duckdb.Error, OSError) as exc:
+        logger.debug("读取 signals 失败（按空处理）: %s", exc)
+        return []
+
+
 def read_signals(db_path: str | Path, limit: int = 200) -> list[dict]:
     """按时间倒序读信号历史（``asof`` desc），默认最近 200 条。"""
     limit = max(0, int(limit))
     if limit == 0:
         return []
     sql = (
-        f"SELECT {', '.join(SIGNAL_COLUMNS)} FROM signals "
-        "ORDER BY asof DESC, created_at DESC LIMIT ?"
+        f"SELECT {_SIGNAL_COLUMNS_SQL} FROM signals "
+        f"ORDER BY {_q('asof')} DESC, created_at DESC LIMIT ?"
     )
-    with connect(db_path) as con:
-        rows = con.execute(sql, (limit,)).fetchall()
-    return [_row_to_signal(r) for r in rows]
+    return [_row_to_signal(row) for row in _query_signals(db_path, sql, [limit])]
 
 
 def read_latest_signals(db_path: str | Path, symbols: list[str]) -> list[dict]:
@@ -499,14 +481,33 @@ def read_latest_signals(db_path: str | Path, symbols: list[str]) -> list[dict]:
         return []
     marks = ", ".join("?" for _ in syms)
     sql = f"""
-        SELECT {', '.join(SIGNAL_COLUMNS)} FROM (
+        SELECT {_SIGNAL_COLUMNS_SQL} FROM (
             SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY symbol ORDER BY asof DESC, created_at DESC
+                PARTITION BY symbol ORDER BY {_q('asof')} DESC, created_at DESC
             ) AS _rn
             FROM signals WHERE symbol IN ({marks})
         ) WHERE _rn = 1
         ORDER BY symbol
     """
-    with connect(db_path) as con:
-        rows = con.execute(sql, tuple(syms)).fetchall()
-    return [_row_to_signal(r) for r in rows]
+    return [_row_to_signal(row) for row in _query_signals(db_path, sql, syms)]
+
+
+__all__ = [
+    "DAILY_COLUMNS",
+    "MINUTE_COLUMNS",
+    "PARQUET_DIR_ENV",
+    "connect",
+    "ensure_parquet_dirs",
+    "get_storage_tables",
+    "get_table_names",
+    "init_db",
+    "parquet_root",
+    "read_daily",
+    "read_daily_multi",
+    "read_latest_signals",
+    "read_minute",
+    "read_signals",
+    "upsert_daily",
+    "upsert_minute",
+    "write_signal",
+]

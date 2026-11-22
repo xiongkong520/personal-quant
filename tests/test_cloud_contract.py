@@ -266,14 +266,15 @@ def test_worker_source_declares_contract_endpoints():
 
 def test_security_module_covers_required_controls():
     security = (WORKER / "src" / "security.ts").read_text(encoding="utf-8")
-    # 反爬 UA 黑名单（需求点名的 UA 都要覆盖）
-    for needle in ("curl", "wget", "python-requests", "scrapy", "httpie", "node-fetch", "go-http-client", "headlesschrome"):
-        assert needle.lower() in security.lower(), f"UA 黑名单缺 {needle}"
+    # 用户要求已取消 UA/Accept 黑名单：确认拦截逻辑已移除，反爬交由 Turnstile
+    assert "UA_BLACKLIST" not in security, "UA 黑名单应已移除"
+    assert "checkUserAgent" in security and "checkAcceptHeader" in security
+    assert "isTrustedIp" in security, "应支持可信 IP 白名单"
     # 安全响应头
     for header in ("content-security-policy", "x-frame-options", "referrer-policy", "x-content-type-options", "permissions-policy"):
         assert header in security, f"安全响应头缺 {header}"
-    # 限流：默认 60/分钟 + Retry-After 语义 + KV/内存两种实现
-    assert "DEFAULT_RATE_LIMIT_PER_MIN = 60" in security
+    # 限流：默认 120/分钟 + Retry-After 语义 + KV/内存两种实现
+    assert "DEFAULT_RATE_LIMIT_PER_MIN = 120" in security
     assert "RATE_LIMIT_KV" in security and "checkMemoryRateLimit" in security
     # Turnstile + HMAC cookie
     assert "challenges.cloudflare.com/turnstile/v0/siteverify" in security
@@ -564,20 +565,15 @@ def _items(server: dict, query: str = "") -> list[dict]:
 
 
 def test_e2e_health_contract(server: dict):
+    """对外 health 只暴露运行状态（数据库/后端实现细节不外泄）。"""
     status, health = _http("GET", f"{server['base']}/api/health")
     assert status == 200
     assert health["schema"] == 1 and health["ok"] is True
-    assert health["d1"]["status"] == "ok"
-    assert health["d1"]["signals"] >= 1
-    assert health["ingest"]["token_configured"] is True
-    assert health["model"]["kind"] == "softmax_regression"
+    assert health["service"] == "personal-quant-dashboard"
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00", health["now"])
-    security = health["security"]
-    assert security["ua_filter"] is True and security["accept_check"] is True and security["same_origin_cors"] is True
-    assert security["rate_limit_per_min"] == 100000
-    assert security["rate_limit_backend"] == "memory"
-    assert set(security["challenge_required_for"]) == {"/api/signals", "/api/stream", "/api/model"}
-    assert security["cookie"]["name"] == "quant_pass" and security["cookie"]["cookie_key_configured"] is True
+    assert health["model_version"]
+    for leaked in ("d1", "security", "ingest", "environment"):
+        assert leaked not in health, f"health 不应暴露内部字段 {leaked}"
 
 
 def test_e2e_config_contract(server: dict):
@@ -595,30 +591,30 @@ def test_e2e_config_contract(server: dict):
 
 
 def test_e2e_anti_crawl(server: dict):
+    """UA/Accept 黑名单已取消：各类 UA 访问公开端点都应正常，反爬由 Turnstile 承担。"""
     base = server["base"]
-    # curl / wget / python-requests / 无头浏览器 / 抓取库 UA -> 403
-    for bad_ua in (
+    for ua in (
         "curl/8.5.0",
         "Wget/1.21",
         "python-requests/2.31.0",
-        "python-urllib/3.12",
-        "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/131.0.0.0 Safari/537.36",
         "Scrapy/2.11 (+https://scrapy.org)",
         "Go-http-client/1.1",
         "node-fetch/1.0 (+https://github.com/bitinn/node-fetch)",
+        "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/131.0.0.0 Safari/537.36",
     ):
-        status, payload = _http("GET", f"{base}/api/health", user_agent=bad_ua)
-        assert status == 403, f"{bad_ua} 应被 403，实际 {status}"
-        assert isinstance(payload, dict) and payload["error"] == "forbidden_client"
+        status, payload = _http("GET", f"{base}/api/health", user_agent=ua)
+        assert status == 200, f"{ua} 不应被拦截（UA 黑名单已取消），实际 {status}"
+        assert payload["ok"] is True
 
-    # 无 UA / 无 Accept -> 403（用裸 http.client，避免 urllib 补默认头）
+    # 无 UA / 无 Accept 也不再拦截公开端点
     status, _ = _raw_http(base, "GET", "/api/health", {"accept": "application/json"})
-    assert status == 403, "无 UA 应 403"
+    assert status == 200, "无 UA 不应被拦截"
     status, _ = _raw_http(base, "GET", "/api/health", {"user-agent": BROWSER_UA})
-    assert status == 403, "无 Accept 应 403"
-    # 正常浏览器请求 -> 200（公开端点 health）
-    status, _ = _raw_http(base, "GET", "/api/health", {"user-agent": BROWSER_UA, "accept": "application/json"})
-    assert status == 200
+    assert status == 200, "无 Accept 不应被拦截"
+
+    # 未人机验证访问受保护端点 -> 401 challenge（与 UA 无关）
+    status, payload = _http("GET", f"{base}/api/signals", user_agent="curl/8.5.0")
+    assert status == 401 and isinstance(payload, dict) and payload.get("challenge") is True
 
 
 def test_e2e_challenge_required(server: dict):
@@ -790,15 +786,15 @@ def test_e2e_ingest_valid_and_idempotent(server: dict):
         "status": "ok",
         "top_features": [{"name": "ret_1d", "value": 0.002, "contrib": 0.003}],
     }
-    before = _http("GET", f"{base}/api/health")[1]["d1"]["signals"]
+    before = len(_items(server, "?limit=500"))
     status, payload = _http("POST", f"{base}/api/ingest", token=E2E_TOKEN, body=signal, user_agent="python-httpx/0.27.0")
     assert status == 200 and payload["accepted"] == 1, payload
-    after_first = _http("GET", f"{base}/api/health")[1]["d1"]["signals"]
+    after_first = len(_items(server, "?limit=500"))
     assert after_first == before + 1
 
     status, payload = _http("POST", f"{base}/api/ingest", token=E2E_TOKEN, body=signal, user_agent="python-httpx/0.27.0")
     assert status == 200 and payload["accepted"] == 1
-    after_second = _http("GET", f"{base}/api/health")[1]["d1"]["signals"]
+    after_second = len(_items(server, "?limit=500"))
     assert after_second == after_first, "同一 signal_id 重复推送必须幂等（UPSERT）"
 
     stored = [item for item in _items(server, "?symbols=601398") if item["symbol"] == "601398"]
@@ -914,6 +910,7 @@ def test_e2e_rate_limit(tmp_path: Path):
 def test_e2e_ingest_503_without_token(tmp_path: Path):
     with _running_server(tmp_path / "no_token.sqlite", extra_args=("--no-token",)) as base:
         status, health = _http("GET", f"{base}/api/health")
-        assert status == 200 and health["ingest"]["token_configured"] is False
+        assert status == 200 and health["ok"] is True
+        # health 已脱敏（不暴露 token 配置）；未配置 token 时推送返回 503
         status, payload = _http("POST", f"{base}/api/ingest", token="whatever", body={"symbol": "600519"})
         assert status == 503 and payload["error"] == "ingest_token_not_configured"

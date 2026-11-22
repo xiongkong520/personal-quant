@@ -25,37 +25,6 @@ export const COOKIE_TTL_SECONDS = 3600;
 export const DEFAULT_RATE_LIMIT_PER_MIN = 120;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
-/**
- * 爬虫/脚本 UA 黑名单（大小写不敏感）。curl/wget 等命令行工具、常见抓取库、
- * 无头浏览器、SEO 爬虫都会被拦。空 UA 也拦。
- */
-const UA_BLACKLIST: readonly RegExp[] = [
-  /curl/i,
-  /wget/i,
-  /python-requests/i,
-  /python-urllib/i,
-  /aiohttp/i,
-  /\bhttpx?\b/i,
-  /scrapy/i,
-  /httpie/i,
-  /node-fetch/i,
-  /undici/i,
-  /axios/i,
-  /go-http-client/i,
-  /okhttp/i,
-  /\bjava\//i,
-  /libwww-perl/i,
-  /headlesschrome/i,
-  /phantomjs/i,
-  /puppeteer/i,
-  /playwright/i,
-  /selenium/i,
-  /webdriver/i,
-  /\b(?:bot|spider|crawler|scraper)\b/i,
-  /postmanruntime/i,
-  /insomnia/i,
-];
-
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   "content-security-policy":
     "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",

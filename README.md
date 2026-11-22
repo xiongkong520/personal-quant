@@ -48,6 +48,12 @@ curl 127.0.0.1:8788/api/health
 
 公网部署（可选，需 Cloudflare 账号）：见 [cloudflare/worker/README.md](cloudflare/worker/README.md) 与 [docs/SECURITY.md](docs/SECURITY.md)。
 
+## 存储
+
+- **行情数据**：Parquet 文件（`data/parquet/`，按 symbol 分区），DuckDB 直接 `read_parquet` 查询，列式扫描快
+- **信号 / 模拟盘状态**：DuckDB 单库（`data/db/quant.duckdb`）
+- 旧 SQLite 数据迁移：`python scripts/migrate_storage.py`（逐表行数校验、幂等）
+
 ## 目录
 
 ```

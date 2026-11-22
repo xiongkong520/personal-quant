@@ -1,14 +1,14 @@
 """日线读取与规范化（train / predict / backtest 共用）。
 
-优先调用数据层 ``quant.data.store.read_daily_multi``（契约 §9），
-数据层尚未实现或不可用时退回直连 SQLite 读 ``daily_bars``（只读，不写库）。
-数据只从本地 ``data/db/quant.db`` 读，不联网。
+优先调用数据层 ``quant.data.store.read_daily_multi``（契约 §9，内部是 DuckDB
+``read_parquet`` 查 ``data/parquet/daily_bars/``）；数据层异常时退回直接读 Parquet
+（只读，不写库，不联网）。``data.db`` 现在是状态库 DuckDB 的路径，仅用于推导
+Parquet 根目录。
 """
 from __future__ import annotations
 
 import logging
 import math
-import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -158,35 +158,20 @@ def normalize_daily_frame(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 读取
 # ---------------------------------------------------------------------------
-def _read_sql_daily(
+def _read_parquet_daily(
     symbols: list[str],
     db_path: Path,
     start: str | None,
     end: str | None,
 ) -> pd.DataFrame:
-    if not db_path.exists():
-        raise FileNotFoundError(
-            f"行情库不存在: {db_path}（请先运行 python -m quant.cli fetch 采集数据）"
-        )
-    syms = [str(s).strip().zfill(6) for s in symbols if str(s).strip()]
-    clauses: list[str] = []
-    params: list[object] = []
-    if syms:
-        clauses.append(f"symbol IN ({', '.join('?' for _ in syms)})")
-        params.extend(syms)
-    if start:
-        clauses.append("trade_date >= ?")
-        params.append(pd.Timestamp(start).strftime("%Y-%m-%d"))
-    if end:
-        clauses.append("trade_date <= ?")
-        params.append(pd.Timestamp(end).strftime("%Y-%m-%d"))
-    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = f"SELECT * FROM daily_bars{where} ORDER BY symbol, trade_date"
+    """直接读 Parquet 行情兜底（不依赖 store 的其它部分，不联网）。"""
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as con:
-            df = pd.read_sql_query(sql, con, params=params)
-    except Exception as exc:
-        raise RuntimeError(f"读取 daily_bars 失败（{db_path}）: {exc}") from exc
+        from quant.data import parquet_store, store  # noqa: PLC0415
+
+        root = store.parquet_root(db_path)
+        df = parquet_store.read_daily_multi(root, list(symbols), start=start, end=end)
+    except Exception as exc:  # pragma: no cover - 数据层损坏时给出可读错误
+        raise RuntimeError(f"读取 daily_bars Parquet 失败（db={db_path}）: {exc}") from exc
     return normalize_daily_frame(df)
 
 
@@ -196,21 +181,21 @@ def load_daily_multi(
     start: str | None = None,
     end: str | None = None,
 ) -> pd.DataFrame:
-    """读多只股票日线；优先数据层实现，缺失时直连 SQLite 兜底。"""
+    """读多只股票日线；优先数据层实现，异常时直接读 Parquet 兜底。"""
     db_path = resolve_db_path(cfg)
     df = None
     try:
-        from quant.data.store import read_daily_multi as store_read  # type: ignore
+        from quant.data.store import read_daily_multi as store_read  # noqa: PLC0415
     except Exception:  # pragma: no cover - 数据层未就绪时走兜底
         store_read = None
     if store_read is not None:
         try:
             df = store_read(list(symbols), db_path, start=start, end=end)
-        except Exception as exc:  # 数据层异常时退回本地 SQL（保持可离线）
-            logger.debug("data.store.read_daily_multi 不可用，走 SQL 兜底: %s", exc)
+        except Exception as exc:  # 数据层异常时退回直接读 Parquet（保持可离线）
+            logger.debug("data.store.read_daily_multi 不可用，走 Parquet 兜底: %s", exc)
             df = None
     if df is None or len(df) == 0:
-        df = _read_sql_daily(list(symbols), db_path, start, end)
+        df = _read_parquet_daily(list(symbols), db_path, start, end)
     return normalize_daily_frame(df)
 
 

@@ -157,7 +157,7 @@ def _to_date_str_series(values: pd.Series) -> pd.Series:
 
 
 def _as_python(value):
-    """numpy/pandas 标量 → sqlite3 可接受的 Python 标量；缺省值 → None。"""
+    """numpy/pandas 标量 → 可写入 Parquet / DuckDB 的 Python 标量；缺省值 → None。"""
     if value is None or value is pd.NaT:
         return None
     if isinstance(value, float) and np.isnan(value):
@@ -174,7 +174,7 @@ def _as_python(value):
 
 
 def records(df: pd.DataFrame, columns: tuple[str, ...] | list[str]) -> list[tuple]:
-    """DataFrame → sqlite3 可直接 executemany 的原生类型元组列表。"""
+    """DataFrame → Parquet / DuckDB 可直接写入的原生类型元组列表。"""
     missing = [c for c in columns if c not in df.columns]
     if missing:
         raise ValueError(f"DataFrame 缺少列: {missing}")

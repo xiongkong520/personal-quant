@@ -1,10 +1,10 @@
 """模拟盘引擎单测（契约 §3.4 / §6 / §9）：固定行情下精确断言现金/持仓/净值/胜率。
 
-全部离线：fixture 数据在 tests/fixtures/paper/paper_seed.py 中构造，不联网、不依赖 data-dev。
+全部离线：fixture 数据在 tests/fixtures/paper/paper_seed.py 中构造（行情 Parquet +
+状态 DuckDB），不联网、不依赖 data-dev。
 """
 from __future__ import annotations
 
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -31,12 +31,7 @@ def _setup(tmp_path: Path, scenario, *, initial_cash: float = 100000, **paper_ov
 
 
 def _rows(db: Path, sql: str, params=()) -> list[dict]:
-    conn = sqlite3.connect(str(db))
-    conn.row_factory = sqlite3.Row
-    try:
-        return [dict(row) for row in conn.execute(sql, params).fetchall()]
-    finally:
-        conn.close()
+    return paper_seed.fetch_rows(db, sql, params)
 
 
 def _orders(db: Path) -> list[dict]:
@@ -250,19 +245,16 @@ def test_same_day_buy_cannot_sell_rejected(tmp_path: Path) -> None:
     cfg = paper_seed.make_cfg(db, initial_cash=100000)
     engine.init_account(100000, db)
 
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute(
-            "INSERT INTO paper_positions(symbol,qty,available_qty,avg_cost,last_price,updated_at)"
-            " VALUES('600519',1000,0,10.0,10.0,'2026-11-17')"
-        )
-        conn.execute(
-            "INSERT INTO paper_orders(order_id,symbol,side,qty,target_price,status,reject_reason,created_at)"
-            " VALUES('test-sell','600519','sell',1000,10.5,'pending',NULL,'2026-11-17T09:30:00+08:00')"
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    paper_seed.execute_sql(
+        db,
+        "INSERT INTO paper_positions(symbol,qty,available_qty,avg_cost,last_price,updated_at)"
+        " VALUES('600519',1000,0,10.0,10.0,'2026-11-17')",
+    )
+    paper_seed.execute_sql(
+        db,
+        "INSERT INTO paper_orders(order_id,symbol,side,qty,target_price,status,reject_reason,created_at)"
+        " VALUES('test-sell','600519','sell',1000,10.5,'pending',NULL,'2026-11-17T09:30:00+08:00')",
+    )
 
     result = engine.fill_pending_orders(db, "2026-11-17", cfg)
     assert result["rejected"] == 1 and result["filled"] == 0
@@ -282,19 +274,16 @@ def test_sell_qty_clamped_to_available(tmp_path: Path) -> None:
     cfg = paper_seed.make_cfg(db, initial_cash=100000)
     engine.init_account(100000, db)
 
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.execute(
-            "INSERT INTO paper_positions(symbol,qty,available_qty,avg_cost,last_price,updated_at)"
-            " VALUES('600519',1000,1000,10.0,10.0,'2026-11-17')"
-        )
-        conn.execute(
-            "INSERT INTO paper_orders(order_id,symbol,side,qty,target_price,status,reject_reason,created_at)"
-            " VALUES('test-oversell','600519','sell',5000,10.5,'pending',NULL,'2026-11-17T09:30:00+08:00')"
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    paper_seed.execute_sql(
+        db,
+        "INSERT INTO paper_positions(symbol,qty,available_qty,avg_cost,last_price,updated_at)"
+        " VALUES('600519',1000,1000,10.0,10.0,'2026-11-17')",
+    )
+    paper_seed.execute_sql(
+        db,
+        "INSERT INTO paper_orders(order_id,symbol,side,qty,target_price,status,reject_reason,created_at)"
+        " VALUES('test-oversell','600519','sell',5000,10.5,'pending',NULL,'2026-11-17T09:30:00+08:00')",
+    )
 
     result = engine.fill_pending_orders(db, "2026-11-17", cfg)
     assert result["filled"] == 1

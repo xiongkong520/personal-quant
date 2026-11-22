@@ -1,8 +1,9 @@
 """模拟盘引擎（契约 §3.4 / §6 / §9）。
 
 核心行为（全部为「模拟」，不接券商、不下真实单）：
-- 账户与状态存本地 SQLite 的 ``paper_*`` 表（契约 §3.4）；
-- 信号来源为 ``signals`` 表里 ``status='ok'`` 且执行时点未过期的信号；
+- 账户与状态存本地 DuckDB 的 ``paper_*`` 表（契约 §3.4，库文件 ``data/db/quant.duckdb``）；
+- 行情（日线）来自 Parquet（``data/parquet/daily_bars/``），一次推进只加载一次；
+- 信号来源为 DuckDB ``signals`` 表里 ``status='ok'`` 且执行时点未过期的信号；
   T 日收盘后信号 → T+1 交易日 09:30 以开盘价 ± 滑点成交（开盘触及涨/跌停则拒单）；
 - 手数、费用、滑点、T+1、涨跌停等规则全部调用 ``quant.paper.rules``（与回测共用同一实现）；
 - 现金不允许为负、不允许超卖；所有被拒订单落库存 ``reject_reason``；
@@ -18,12 +19,14 @@ advance 的「虚拟交易日」推进规则：
 """
 from __future__ import annotations
 
-import sqlite3
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from quant.config import cfg_path
+from quant.data import db as dbmod
+from quant.data import store
 from quant.paper import rules
 
 TZ = timezone(timedelta(hours=8))
@@ -38,16 +41,16 @@ EXPIRED = "expired"
 _DDL = """
 CREATE TABLE IF NOT EXISTS paper_account (
     id TEXT PRIMARY KEY,
-    cash REAL NOT NULL DEFAULT 0,
+    cash DOUBLE NOT NULL DEFAULT 0,
     created_at TEXT,
-    initial_cash REAL
+    initial_cash DOUBLE
 );
 CREATE TABLE IF NOT EXISTS paper_positions (
     symbol TEXT PRIMARY KEY,
     qty INTEGER NOT NULL DEFAULT 0,
     available_qty INTEGER NOT NULL DEFAULT 0,
-    avg_cost REAL NOT NULL DEFAULT 0,
-    last_price REAL NOT NULL DEFAULT 0,
+    avg_cost DOUBLE NOT NULL DEFAULT 0,
+    last_price DOUBLE NOT NULL DEFAULT 0,
     updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS paper_orders (
@@ -55,13 +58,13 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     symbol TEXT,
     side TEXT,
     qty INTEGER,
-    target_price REAL,
+    target_price DOUBLE,
     status TEXT,
     reject_reason TEXT,
     created_at TEXT,
     filled_at TEXT,
-    filled_price REAL,
-    fee REAL
+    filled_price DOUBLE,
+    fee DOUBLE
 );
 CREATE TABLE IF NOT EXISTS paper_trades (
     trade_id TEXT PRIMARY KEY,
@@ -69,27 +72,33 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     symbol TEXT,
     side TEXT,
     qty INTEGER,
-    price REAL,
-    amount REAL,
-    fee REAL,
-    realized_pnl REAL,
+    price DOUBLE,
+    amount DOUBLE,
+    fee DOUBLE,
+    realized_pnl DOUBLE,
     trade_date TEXT,
     created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS paper_equity_curve (
     ts TEXT PRIMARY KEY,
-    cash REAL,
-    market_value REAL,
-    equity REAL
+    cash DOUBLE,
+    market_value DOUBLE,
+    equity DOUBLE
 );
 """
+
+#: 旧库「只增列」迁移（DuckDB 无 sqlite_master，用 information_schema 判断）
+_ADD_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("paper_account", "initial_cash", "DOUBLE"),
+    ("paper_trades", "realized_pnl", "DOUBLE"),
+)
 
 
 # ---------------------------------------------------------------------------
 # 通用小工具
 # ---------------------------------------------------------------------------
 def db_path(cfg: dict[str, Any]) -> Path:
-    """从 cfg 取 SQLite 路径（契约 §3：data.db）。"""
+    """从 cfg 取状态库路径（契约 §3：data.db，现已指向 DuckDB）。"""
     try:
         return Path(cfg_path(cfg, "data.db"))
     except (KeyError, TypeError) as exc:  # 兼容只传 data.db 的测试配置
@@ -103,47 +112,32 @@ def _now_iso() -> str:
     return datetime.now(TZ).isoformat(timespec="seconds")
 
 
-def _connect(db: str | Path) -> sqlite3.Connection:
-    path = Path(db)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=15000")
-    return conn
+def _table_exists(conn: Any, table: str) -> bool:
+    return dbmod.table_exists(conn, table)
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-    ).fetchone()
-    return row is not None
+def _columns(conn: Any, table: str) -> set[str]:
+    return set(dbmod.columns(conn, table))
 
 
-def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    try:
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    except sqlite3.Error:
-        return set()
-    return {str(row[1]) for row in rows}
-
-
-def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+def _add_column_if_missing(conn: Any, table: str, column: str, ddl: str) -> None:
     if _table_exists(conn, table) and column not in _columns(conn, table):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
-def ensure_paper_tables(conn: sqlite3.Connection) -> None:
-    """幂等建 paper_* 表；对旧库做「只增列」迁移。"""
-    conn.executescript(_DDL)
-    _add_column_if_missing(conn, "paper_account", "initial_cash", "REAL")
-    _add_column_if_missing(conn, "paper_trades", "realized_pnl", "REAL")
-    conn.commit()
+def ensure_paper_tables(conn: Any) -> None:
+    """幂等建 paper_* 表；对旧库做「只增列」迁移（DuckDB 连接）。"""
+    conn.execute(_DDL)
+    for table, column, ddl in _ADD_COLUMNS:
+        _add_column_if_missing(conn, table, column, ddl)
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         out = float(value)
     except (TypeError, ValueError):
+        return default
+    if out != out:  # NaN
         return default
     return out
 
@@ -223,82 +217,97 @@ def _weekdays_after(start: str, count: int) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# 行情（Parquet，一次推进加载一次）
+# ---------------------------------------------------------------------------
+@dataclass
+class _BarBook:
+    """内存日线索引：``(symbol, trade_date) → bar`` + 全市场交易日列表。"""
+
+    rows: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    dates: list[str] = field(default_factory=list)
+    last_close: dict[str, float] = field(default_factory=dict)
+
+    @classmethod
+    def load(cls, db: str | Path, symbols: list[str]) -> "_BarBook":
+        syms = [str(s) for s in symbols if str(s).strip()]
+        if not syms:
+            return cls()
+        frame = store.read_daily_multi(syms, db)
+        rows: dict[tuple[str, str], dict[str, Any]] = {}
+        dates: set[str] = set()
+        last_close: dict[str, float] = {}
+        for record in frame.to_dict("records"):
+            symbol = str(record.get("symbol") or "")
+            trade_date = str(record.get("trade_date") or "")
+            if not symbol or not trade_date:
+                continue
+            rows[(symbol, trade_date)] = record
+            dates.add(trade_date)
+            close = _as_float(record.get("close"))
+            if close > 0:
+                last_close[symbol] = close
+        return cls(rows=rows, dates=sorted(dates), last_close=last_close)
+
+    def bar(self, symbol: str, trade_date: str) -> dict[str, Any] | None:
+        return self.rows.get((str(symbol), str(trade_date)))
+
+    def close(self, symbol: str) -> float | None:
+        value = self.last_close.get(str(symbol))
+        return value if value and value > 0 else None
+
+
+def _load_bars(db: str | Path, cfg: dict[str, Any]) -> _BarBook:
+    return _BarBook.load(db, [str(s) for s in (cfg.get("symbols") or [])])
+
+
+# ---------------------------------------------------------------------------
 # 账户 / 持仓 / 行情 / 信号读取
 # ---------------------------------------------------------------------------
-def _load_account(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    row = conn.execute("SELECT * FROM paper_account WHERE id=?", (ACCOUNT_ID,)).fetchone()
-    return dict(row) if row else None
+def _load_account(conn: Any) -> dict[str, Any] | None:
+    return dbmod.fetch_dict(conn, "SELECT * FROM paper_account WHERE id=?", [ACCOUNT_ID])
 
 
-def _insert_account(conn: sqlite3.Connection, cash: float) -> None:
+def _insert_account(conn: Any, cash: float) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO paper_account(id, cash, created_at, initial_cash) VALUES (?,?,?,?)",
+        "INSERT INTO paper_account(id, cash, created_at, initial_cash) VALUES (?,?,?,?) "
+        "ON CONFLICT (id) DO UPDATE SET cash=excluded.cash, created_at=excluded.created_at,"
+        " initial_cash=excluded.initial_cash",
         (ACCOUNT_ID, rules.round_cents(cash), _now_iso(), rules.round_cents(cash)),
     )
 
 
-def _cash(conn: sqlite3.Connection) -> float:
+def _cash(conn: Any) -> float:
     account = _load_account(conn)
     return rules.round_cents(_as_float(account.get("cash")) if account else 0.0)
 
 
-def _set_cash(conn: sqlite3.Connection, cash: float) -> None:
+def _set_cash(conn: Any, cash: float) -> None:
     conn.execute(
         "UPDATE paper_account SET cash=? WHERE id=?", (rules.round_cents(cash), ACCOUNT_ID)
     )
 
 
-def _get_position(conn: sqlite3.Connection, symbol: str) -> dict[str, Any] | None:
-    row = conn.execute("SELECT * FROM paper_positions WHERE symbol=?", (symbol,)).fetchone()
-    return dict(row) if row else None
+def _get_position(conn: Any, symbol: str) -> dict[str, Any] | None:
+    return dbmod.fetch_dict(conn, "SELECT * FROM paper_positions WHERE symbol=?", [symbol])
 
 
-def _all_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute("SELECT * FROM paper_positions ORDER BY symbol").fetchall()
-    return [dict(row) for row in rows]
+def _all_positions(conn: Any) -> list[dict[str, Any]]:
+    return dbmod.fetch_dicts(conn, "SELECT * FROM paper_positions ORDER BY symbol")
 
 
-def _read_bar(conn: sqlite3.Connection, symbol: str, trade_date: str) -> dict[str, Any] | None:
-    try:
-        row = conn.execute(
-            "SELECT * FROM daily_bars WHERE symbol=? AND trade_date=?", (symbol, trade_date)
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    return dict(row) if row else None
+def _bar_dates(book: _BarBook) -> list[str]:
+    return book.dates
 
 
-def _bar_dates(conn: sqlite3.Connection, symbols: list[str]) -> list[str]:
-    """deployed 日线里的全部交易日（升序）；无表/无数据返回 []。"""
-    if not _table_exists(conn, "daily_bars"):
-        return []
-    try:
-        if symbols:
-            marks = ",".join("?" for _ in symbols)
-            rows = conn.execute(
-                f"SELECT DISTINCT trade_date FROM daily_bars WHERE symbol IN ({marks}) ORDER BY trade_date",
-                tuple(symbols),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT DISTINCT trade_date FROM daily_bars ORDER BY trade_date"
-            ).fetchall()
-    except sqlite3.Error:
-        return []
-    return [str(row[0]) for row in rows if row[0]]
-
-
-def _read_all_signals(conn: sqlite3.Connection, symbols: list[str]) -> dict[str, list[dict[str, Any]]]:
+def _read_all_signals(
+    conn: Any, symbols: list[str]
+) -> dict[str, list[dict[str, Any]]]:
     """status='ok' 的信号按 trade_date 分组；无 signals 表返回 {}。"""
     if not _table_exists(conn, "signals"):
         return {}
-    try:
-        rows = conn.execute("SELECT * FROM signals WHERE status='ok'").fetchall()
-    except sqlite3.Error:
-        return {}
+    rows = dbmod.fetch_dicts(conn, "SELECT * FROM signals WHERE status='ok'")
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        item = dict(row)
+    for item in rows:
         symbol = str(item.get("symbol") or "")
         if symbols and symbol not in symbols:
             continue
@@ -309,28 +318,30 @@ def _read_all_signals(conn: sqlite3.Connection, symbols: list[str]) -> dict[str,
     return grouped
 
 
-def _read_signal_dates(conn: sqlite3.Connection, symbols: list[str]) -> list[str]:
+def _read_signal_dates(conn: Any, symbols: list[str]) -> list[str]:
     if not _table_exists(conn, "signals"):
         return []
-    try:
-        if symbols:
-            marks = ",".join("?" for _ in symbols)
-            rows = conn.execute(
-                f"SELECT DISTINCT trade_date FROM signals WHERE status='ok' AND symbol IN ({marks}) ORDER BY trade_date",
-                tuple(symbols),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT DISTINCT trade_date FROM signals WHERE status='ok' ORDER BY trade_date"
-            ).fetchall()
-    except sqlite3.Error:
-        return []
-    return [str(row[0]) for row in rows if row[0]]
+    if symbols:
+        marks = ", ".join("?" for _ in symbols)
+        rows = dbmod.fetch_dicts(
+            conn,
+            f"SELECT DISTINCT trade_date FROM signals WHERE status='ok' AND symbol IN ({marks})"
+            " ORDER BY trade_date",
+            list(symbols),
+        )
+    else:
+        rows = dbmod.fetch_dicts(
+            conn,
+            "SELECT DISTINCT trade_date FROM signals WHERE status='ok' ORDER BY trade_date",
+        )
+    return [str(row["trade_date"]) for row in rows if row.get("trade_date")]
 
 
-def _last_equity_ts(conn: sqlite3.Connection) -> str | None:
-    row = conn.execute("SELECT ts FROM paper_equity_curve ORDER BY ts DESC LIMIT 1").fetchone()
-    return str(row[0]) if row and row[0] else None
+def _last_equity_ts(conn: Any) -> str | None:
+    value = dbmod.fetch_scalar(
+        conn, "SELECT ts FROM paper_equity_curve ORDER BY ts DESC LIMIT 1"
+    )
+    return str(value) if value else None
 
 
 def _limit_prices_for_bar(symbol: str, bar: dict[str, Any]) -> tuple[float, float]:
@@ -348,7 +359,7 @@ def _limit_prices_for_bar(symbol: str, bar: dict[str, Any]) -> tuple[float, floa
     return rules.limit_prices(pre_close, symbol, is_st)
 
 
-def _current_equity(conn: sqlite3.Connection) -> float:
+def _current_equity(conn: Any) -> float:
     """用现金 + 持仓最新价估算账户权益（用于买入仓位上限）。"""
     cash = _cash(conn)
     market_value = 0.0
@@ -359,7 +370,7 @@ def _current_equity(conn: sqlite3.Connection) -> float:
 
 
 def _buy_capacity(
-    conn: sqlite3.Connection, cfg: dict[str, Any], symbol: str, price: float
+    conn: Any, cfg: dict[str, Any], symbol: str, price: float
 ) -> tuple[int, str | None]:
     """按「单票仓位上限 + 现金（含费用）」计算可买整手数。"""
     lot = rules.lot_size(cfg)
@@ -383,20 +394,16 @@ def _buy_capacity(
 
 
 def _estimate_fill_price(
-    conn: sqlite3.Connection, symbol: str, side: str, cfg: dict[str, Any]
+    book: _BarBook, symbol: str, side: str, cfg: dict[str, Any]
 ) -> float | None:
-    """下单时估算成交价（用于决定股数）；真实成交在 fill 阶段重算。"""
-    # 无明确执行日时用最新一根日线的收盘价估算
-    try:
-        row = conn.execute(
-            "SELECT close FROM daily_bars WHERE symbol=? ORDER BY trade_date DESC LIMIT 1",
-            (symbol,),
-        ).fetchone()
-    except sqlite3.Error:
-        row = None
-    if not row or _as_float(row[0]) <= 0:
+    """下单时估算成交价（用于决定股数）；真实成交在 fill 阶段重算。
+
+    无明确执行日时用最新一根日线的收盘价估算。
+    """
+    close = book.close(symbol)
+    if not close or close <= 0:
         return None
-    return rules.slippage_price(_as_float(row[0]), side, cfg, tick_round=_tick_round(cfg))
+    return rules.slippage_price(close, side, cfg, tick_round=_tick_round(cfg))
 
 
 # ---------------------------------------------------------------------------
@@ -407,24 +414,18 @@ def init_account(cash: float, db_path: Path | str) -> None:
     initial = rules.round_cents(_as_float(cash))
     if initial < 0:
         raise ValueError("初始现金不能为负")
-    conn = _connect(db_path)
-    try:
+    with dbmod.connect(Path(db_path)) as conn:
         ensure_paper_tables(conn)
-        with conn:
-            conn.execute("DELETE FROM paper_positions")
-            conn.execute("DELETE FROM paper_orders")
-            conn.execute("DELETE FROM paper_trades")
-            conn.execute("DELETE FROM paper_equity_curve")
-        _insert_account(conn, initial)
-        conn.commit()
-    finally:
-        conn.close()
+        with dbmod.transaction(conn):
+            for table in ("paper_positions", "paper_orders", "paper_trades", "paper_equity_curve"):
+                conn.execute(f"DELETE FROM {table}")
+            _insert_account(conn, initial)
 
 
 # ---------------------------------------------------------------------------
 # 交易日推进
 # ---------------------------------------------------------------------------
-def _initial_start(conn: sqlite3.Connection, cfg: dict[str, Any], bar_dates: list[str]) -> str:
+def _initial_start(conn: Any, cfg: dict[str, Any], bar_dates: list[str]) -> str:
     """首次推进的起始日：优先回放最早信号对应的 T+1，否则从最新行情日。"""
     symbols = list(cfg.get("symbols") or [])
     signal_dates = _read_signal_dates(conn, symbols)
@@ -440,7 +441,7 @@ def _initial_start(conn: sqlite3.Connection, cfg: dict[str, Any], bar_dates: lis
 
 
 def _plan_dates(
-    conn: sqlite3.Connection, cfg: dict[str, Any], days: int, bar_dates: list[str]
+    conn: Any, cfg: dict[str, Any], days: int, bar_dates: list[str]
 ) -> list[str]:
     cursor = _last_equity_ts(conn)
     if cursor is None:
@@ -465,7 +466,7 @@ def _prev_date(bar_dates: list[str], trade_date: str) -> str | None:
     return earlier[-1] if earlier else None
 
 
-def _exec_open(conn: sqlite3.Connection) -> None:
+def _exec_open(conn: Any) -> None:
     """交易日开盘结算 T+1：前一交易日起持有的股份全部可卖。"""
     conn.execute("UPDATE paper_positions SET available_qty = qty")
 
@@ -488,21 +489,22 @@ def _order_id_for(signal_row: dict[str, Any], side: str) -> str:
     return f"{signal_row.get('symbol')}-{signal_row.get('trade_date')}-{side}"
 
 
-def _order_exists(conn: sqlite3.Connection, order_id: str) -> bool:
-    row = conn.execute("SELECT 1 FROM paper_orders WHERE order_id=?", (order_id,)).fetchone()
+def _order_exists(conn: Any, order_id: str) -> bool:
+    row = dbmod.fetch_scalar(conn, "SELECT 1 FROM paper_orders WHERE order_id=?", [order_id])
     return row is not None
 
 
-def _has_pending_order(conn: sqlite3.Connection, symbol: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM paper_orders WHERE symbol=? AND status=? LIMIT 1", (symbol, PENDING)
-    ).fetchone()
+def _has_pending_order(conn: Any, symbol: str) -> bool:
+    row = dbmod.fetch_scalar(
+        conn, "SELECT 1 FROM paper_orders WHERE symbol=? AND status=? LIMIT 1", [symbol, PENDING]
+    )
     return row is not None
 
 
 def _create_orders_from_signals(
-    conn: sqlite3.Connection,
+    conn: Any,
     cfg: dict[str, Any],
+    book: _BarBook,
     trade_date: str,
     prev_date: str | None,
     signal_index: dict[str, list[dict[str, Any]]],
@@ -538,14 +540,18 @@ def _create_orders_from_signals(
         if _order_exists(conn, order_id):
             continue
 
-        bar = _read_bar(conn, symbol, trade_date)
+        bar = book.bar(symbol, trade_date)
         open_price = _as_float(bar.get("open")) if bar else 0.0
         if open_price > 0:
             est_price = rules.slippage_price(
                 open_price, side, cfg, tick_round=_tick_round(cfg)
             )
         else:
-            est_price = _as_float(sig.get("price")) or _estimate_fill_price(conn, symbol, side, cfg) or 0.0
+            est_price = (
+                _as_float(sig.get("price"))
+                or _estimate_fill_price(book, symbol, side, cfg)
+                or 0.0
+            )
 
         reason: str | None = None
         if side == "buy":
@@ -579,7 +585,7 @@ def _create_orders_from_signals(
     return created
 
 
-def _reject_order(conn: sqlite3.Connection, order: dict[str, Any], reason: str) -> None:
+def _reject_order(conn: Any, order: dict[str, Any], reason: str) -> None:
     conn.execute(
         "UPDATE paper_orders SET status=?, reject_reason=? WHERE order_id=?",
         (REJECTED, reason, order.get("order_id")),
@@ -587,7 +593,7 @@ def _reject_order(conn: sqlite3.Connection, order: dict[str, Any], reason: str) 
 
 
 def _record_fill(
-    conn: sqlite3.Connection,
+    conn: Any,
     order: dict[str, Any],
     *,
     qty: int,
@@ -624,7 +630,7 @@ def _record_fill(
 
 
 def _fill_buy(
-    conn: sqlite3.Connection, order: dict[str, Any], price: float, trade_date: str, cfg: dict[str, Any]
+    conn: Any, order: dict[str, Any], price: float, trade_date: str, cfg: dict[str, Any]
 ) -> tuple[bool, str | None]:
     lot = rules.lot_size(cfg)
     cash = _cash(conn)
@@ -663,7 +669,7 @@ def _fill_buy(
 
 
 def _fill_sell(
-    conn: sqlite3.Connection, order: dict[str, Any], price: float, trade_date: str, cfg: dict[str, Any]
+    conn: Any, order: dict[str, Any], price: float, trade_date: str, cfg: dict[str, Any]
 ) -> tuple[bool, str | None]:
     symbol = str(order.get("symbol"))
     pos = _get_position(conn, symbol)
@@ -688,7 +694,7 @@ def _fill_sell(
     left_qty = _as_int(pos.get("qty")) - qty
     left_available = available - qty
     if left_qty <= 0:
-        conn.execute("DELETE FROM paper_positions WHERE symbol=?", (symbol,))
+        conn.execute("DELETE FROM paper_positions WHERE symbol=?", [symbol])
     else:
         conn.execute(
             "UPDATE paper_positions SET qty=?, available_qty=?, last_price=?, updated_at=? WHERE symbol=?",
@@ -701,11 +707,15 @@ def _fill_sell(
 
 
 def _execute_order(
-    conn: sqlite3.Connection, order: dict[str, Any], trade_date: str, cfg: dict[str, Any]
+    conn: Any,
+    order: dict[str, Any],
+    book: _BarBook,
+    trade_date: str,
+    cfg: dict[str, Any],
 ) -> tuple[bool, str | None]:
     symbol = str(order.get("symbol"))
     side = str(order.get("side") or "")
-    bar = _read_bar(conn, symbol, trade_date)
+    bar = book.bar(symbol, trade_date)
     if bar is None or _as_int(bar.get("is_suspended")):
         return False, "__postpone__"  # 停牌/无行情：顺延，不改状态
     open_price = _as_float(bar.get("open"))
@@ -735,18 +745,18 @@ def _execute_order(
 
 
 def _fill_pending(
-    conn: sqlite3.Connection, trade_date: str, cfg: dict[str, Any]
+    conn: Any, book: _BarBook, trade_date: str, cfg: dict[str, Any]
 ) -> tuple[int, int, int]:
     """成交所有 pending 订单；返回 (filled, rejected, postponed)。卖出先于买入处理。"""
-    rows = conn.execute(
+    rows = dbmod.fetch_dicts(
+        conn,
         "SELECT * FROM paper_orders WHERE status=?"
         " ORDER BY CASE side WHEN 'sell' THEN 0 ELSE 1 END, created_at, order_id",
-        (PENDING,),
-    ).fetchall()
+        [PENDING],
+    )
     filled = rejected = postponed = 0
-    for row in rows:
-        order = dict(row)
-        ok, reason = _execute_order(conn, order, trade_date, cfg)
+    for order in rows:
+        ok, reason = _execute_order(conn, order, book, trade_date, cfg)
         if ok:
             filled += 1
         elif reason == "__postpone__":
@@ -757,14 +767,14 @@ def _fill_pending(
     return filled, rejected, postponed
 
 
-def _mark_to_market(conn: sqlite3.Connection, trade_date: str) -> dict[str, float]:
+def _mark_to_market(conn: Any, book: _BarBook, trade_date: str) -> dict[str, float]:
     """按当日收盘价更新持仓 last_price，并追加净值曲线一行。"""
     cash = _cash(conn)
     market_value = 0.0
     for pos in _all_positions(conn):
         symbol = str(pos.get("symbol"))
         price = _as_float(pos.get("last_price")) or _as_float(pos.get("avg_cost"))
-        bar = _read_bar(conn, symbol, trade_date)
+        bar = book.bar(symbol, trade_date)
         if bar is not None and not _as_int(bar.get("is_suspended")):
             close = _as_float(bar.get("close"))
             if close > 0:
@@ -787,7 +797,7 @@ def _mark_to_market(conn: sqlite3.Connection, trade_date: str) -> dict[str, floa
 
 
 def _run_days(
-    conn: sqlite3.Connection, days: int, cfg: dict[str, Any]
+    conn: Any, db_file: str | Path, days: int, cfg: dict[str, Any]
 ) -> dict[str, Any]:
     symbols = [str(s) for s in (cfg.get("symbols") or [])]
     stats: dict[str, Any] = {
@@ -803,7 +813,8 @@ def _run_days(
     if days <= 0:
         return stats
 
-    bar_dates = _bar_dates(conn, symbols)
+    book = _load_bars(db_file, cfg)
+    bar_dates = _bar_dates(book)
     plan = _plan_dates(conn, cfg, days, bar_dates)
     if not plan:
         return stats
@@ -816,15 +827,15 @@ def _run_days(
             prev = max(earlier)
 
     for trade_date in plan:
-        _exec_open(conn)
-        stats["orders_created"] += _create_orders_from_signals(
-            conn, cfg, trade_date, prev, signal_index
-        )
-        filled, rejected, _postponed = _fill_pending(conn, trade_date, cfg)
-        stats["filled"] += filled
-        stats["rejected"] += rejected
-        _mark_to_market(conn, trade_date)
-        conn.commit()
+        with dbmod.transaction(conn):  # 单个交易日内的状态变更原子提交
+            _exec_open(conn)
+            stats["orders_created"] += _create_orders_from_signals(
+                conn, cfg, book, trade_date, prev, signal_index
+            )
+            filled, rejected, _postponed = _fill_pending(conn, book, trade_date, cfg)
+            stats["filled"] += filled
+            stats["rejected"] += rejected
+            _mark_to_market(conn, book, trade_date)
         prev = trade_date
         stats["days_processed"] += 1
 
@@ -834,12 +845,11 @@ def _run_days(
     return stats
 
 
-def _count(conn: sqlite3.Connection, table: str, where: str = "1=1") -> int:
+def _count(conn: Any, table: str, where: str = "1=1") -> int:
     try:
-        row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()
-    except sqlite3.Error:
+        return dbmod.count_rows(conn, table, where)
+    except Exception:  # noqa: BLE001 - 统计失败不应中断主流程
         return 0
-    return int(row[0]) if row else 0
 
 
 # ---------------------------------------------------------------------------
@@ -850,34 +860,29 @@ def advance(days: int, cfg: dict[str, Any]) -> dict[str, Any]:
     days = _as_int(days)
     if days < 0:
         raise ValueError("days 不能为负")
-    db = db_path(cfg)
-    conn = _connect(db)
-    try:
+    db_file = db_path(cfg)
+    with dbmod.connect(db_file) as conn:
         ensure_paper_tables(conn)
         if _load_account(conn) is None:
             _insert_account(conn, _initial_cash(cfg))
-            conn.commit()
-        run_stats = _run_days(conn, days, cfg)
-    finally:
-        conn.close()
+        run_stats = _run_days(conn, db_file, days, cfg)
     snap = snapshot(cfg)
     snap["run"] = run_stats
     return snap
 
 
-def _load_curve(conn: sqlite3.Connection, limit: int | None = CURVE_LIMIT) -> list[dict[str, Any]]:
+def _load_curve(conn: Any, limit: int | None = CURVE_LIMIT) -> list[dict[str, Any]]:
     if not _table_exists(conn, "paper_equity_curve"):
         return []
     if limit and limit > 0:
-        rows = conn.execute(
-            "SELECT * FROM paper_equity_curve ORDER BY ts DESC LIMIT ?", (int(limit),)
-        ).fetchall()
+        rows = dbmod.fetch_dicts(
+            conn, "SELECT * FROM paper_equity_curve ORDER BY ts DESC LIMIT ?", [int(limit)]
+        )
         rows = list(reversed(rows))
     else:
-        rows = conn.execute("SELECT * FROM paper_equity_curve ORDER BY ts").fetchall()
+        rows = dbmod.fetch_dicts(conn, "SELECT * FROM paper_equity_curve ORDER BY ts")
     out = []
-    for row in rows:
-        item = dict(row)
+    for item in rows:
         out.append(
             {
                 "ts": str(item.get("ts")),
@@ -889,7 +894,7 @@ def _load_curve(conn: sqlite3.Connection, limit: int | None = CURVE_LIMIT) -> li
     return out
 
 
-def _trade_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+def _trade_stats(conn: Any) -> dict[str, Any]:
     """交易胜率（交易口径）：已平仓盈利笔数 / 平仓笔数。
 
     「平仓」按成交口径统计每一笔卖出成交（清仓或减仓都算一次平仓），
@@ -904,14 +909,10 @@ def _trade_stats(conn: sqlite3.Connection) -> dict[str, Any]:
             "flat_trades": 0,
             "realized_pnl": 0.0,
         }
-    try:
-        rows = conn.execute("SELECT * FROM paper_trades WHERE side='sell'").fetchall()
-    except sqlite3.Error:
-        rows = []
+    rows = dbmod.fetch_dicts(conn, "SELECT * FROM paper_trades WHERE side='sell'")
     closed = wins = losses = flats = 0
     realized = 0.0
-    for row in rows:
-        item = dict(row)
+    for item in rows:
         pnl = _as_float(item.get("realized_pnl"))
         closed += 1
         realized += pnl
@@ -933,15 +934,13 @@ def _trade_stats(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
     """返回账户快照：现金/持仓市值/权益/今日盈亏/累计收益/交易胜率/最近订单/净值曲线。"""
-    db = db_path(cfg)
-    conn = _connect(db)
-    try:
+    db_file = db_path(cfg)
+    with dbmod.connect(db_file) as conn:
         ensure_paper_tables(conn)
         account = _load_account(conn)
         if account is None:
             _insert_account(conn, _initial_cash(cfg))
-            conn.commit()
-            account = _load_account(conn)
+            account = _load_account(conn) or {}
 
         curve = _load_curve(conn)
         positions = []
@@ -980,21 +979,17 @@ def snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
         orders: list[dict[str, Any]] = []
         trades: list[dict[str, Any]] = []
         if _table_exists(conn, "paper_orders"):
-            orders = [
-                dict(row)
-                for row in conn.execute(
-                    "SELECT * FROM paper_orders ORDER BY COALESCE(filled_at, created_at, '') DESC, order_id DESC LIMIT ?",
-                    (ORDER_LIMIT,),
-                ).fetchall()
-            ]
+            orders = dbmod.fetch_dicts(
+                conn,
+                "SELECT * FROM paper_orders ORDER BY COALESCE(filled_at, created_at, '') DESC, order_id DESC LIMIT ?",
+                [ORDER_LIMIT],
+            )
         if _table_exists(conn, "paper_trades"):
-            trades = [
-                dict(row)
-                for row in conn.execute(
-                    "SELECT * FROM paper_trades ORDER BY COALESCE(trade_date,'') DESC, trade_id DESC LIMIT ?",
-                    (ORDER_LIMIT,),
-                ).fetchall()
-            ]
+            trades = dbmod.fetch_dicts(
+                conn,
+                "SELECT * FROM paper_trades ORDER BY COALESCE(trade_date,'') DESC, trade_id DESC LIMIT ?",
+                [ORDER_LIMIT],
+            )
 
         return {
             "schema": 1,
@@ -1028,8 +1023,6 @@ def snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
                 "trades": _count(conn, "paper_trades"),
             },
         }
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1040,13 +1033,12 @@ def fill_pending_orders(db_path: str | Path, trade_date: str, cfg: dict[str, Any
 
     正常流程由 ``advance`` 调用；单独暴露用于验证 T+1 / 拒单等边界。
     """
-    conn = _connect(db_path)
-    try:
+    file = Path(db_path)
+    book = _load_bars(file, cfg)
+    with dbmod.connect(file) as conn:
         ensure_paper_tables(conn)
-        filled, rejected, postponed = _fill_pending(conn, trade_date, cfg)
-        conn.commit()
-    finally:
-        conn.close()
+        with dbmod.transaction(conn):
+            filled, rejected, postponed = _fill_pending(conn, book, trade_date, cfg)
     return {"filled": filled, "rejected": rejected, "postponed": postponed}
 
 

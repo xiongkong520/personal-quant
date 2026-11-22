@@ -1,59 +1,20 @@
 """供 tests/test_paper_engine.py / tests/test_api.py 共用的离线 fixture。
 
-只构造契约 §3.1（daily_bars）与 §3.3（signals）两张表，不联网、不依赖 data-dev。
-每个场景返回 ``(bars, signals)``，用 ``create_db(path, bars, signals)`` 落到临时 SQLite。
+按新存储布局构造契约 §3.1 行情（Parquet：``daily_bars/symbol=<code>/daily_bars.parquet``）
+与 §3.3 信号（DuckDB ``signals`` 表），不联网、不依赖 data-dev。
+每个场景返回 ``(bars, signals)``，用 ``create_db(path, bars, signals)`` 落到临时库；
+``path`` 是 DuckDB 状态库文件，Parquet 行情由 ``quant.data.store.parquet_root`` 推导。
 """
 from __future__ import annotations
 
 import copy
 import json
-import sqlite3
+import shutil
 from pathlib import Path
 
-DAILY_BARS_DDL = """
-CREATE TABLE IF NOT EXISTS daily_bars (
-    symbol TEXT NOT NULL,
-    trade_date TEXT NOT NULL,
-    open REAL,
-    high REAL,
-    low REAL,
-    close REAL,
-    pre_close REAL,
-    volume INTEGER,
-    amount REAL,
-    pct_chg REAL,
-    turnover_rate REAL,
-    adj_factor REAL DEFAULT 1.0,
-    adj_close REAL,
-    limit_up REAL,
-    limit_down REAL,
-    is_suspended INTEGER DEFAULT 0,
-    is_st INTEGER DEFAULT 0,
-    PRIMARY KEY (symbol, trade_date)
-)
-"""
-
-SIGNALS_DDL = """
-CREATE TABLE IF NOT EXISTS signals (
-    signal_id TEXT PRIMARY KEY,
-    symbol TEXT,
-    asof TEXT,
-    trade_date TEXT,
-    price REAL,
-    direction TEXT,
-    prob_up REAL,
-    prob_flat REAL,
-    prob_down REAL,
-    confidence REAL,
-    horizon TEXT,
-    expires_at TEXT,
-    model_version TEXT,
-    top_features TEXT,
-    source TEXT,
-    status TEXT,
-    created_at TEXT
-)
-"""
+from quant.data import db as duckdb_conn
+from quant.data import store
+from quant.data.models import DAILY_COLUMNS
 
 PROB_BY_DIRECTION = {
     "up": (0.55, 0.25, 0.20),
@@ -161,33 +122,45 @@ def signal(
 
 
 def create_db(path: str | Path, bars: list[dict], signals: list[dict]) -> Path:
-    """建 daily_bars / signals 两表并写入固定数据（覆盖同名临时库）。"""
+    """建临时库：日线写 Parquet、信号写 DuckDB（覆盖同名临时库与 Parquet 目录）。"""
     db = Path(path)
     db.parent.mkdir(parents=True, exist_ok=True)
     if db.exists():
         db.unlink()
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.executescript(DAILY_BARS_DDL)
-        conn.executescript(SIGNALS_DDL)
-        if bars:
-            keys = list(bars[0].keys())
-            sql = "INSERT OR REPLACE INTO daily_bars (%s) VALUES (%s)" % (
-                ",".join(keys),
-                ",".join("?" for _ in keys),
-            )
-            conn.executemany(sql, [tuple(row[k] for k in keys) for row in bars])
-        if signals:
-            keys = list(signals[0].keys())
-            sql = "INSERT OR REPLACE INTO signals (%s) VALUES (%s)" % (
-                ",".join(keys),
-                ",".join("?" for _ in keys),
-            )
+    root = store.parquet_root(db)
+    shutil.rmtree(root, ignore_errors=True)
+    store.init_db(db)
+    if bars:
+        import pandas as pd  # 延迟导入，fixture 被 CLI 脚本直接复用时也能用
+
+        frame = pd.DataFrame(bars)
+        frame = frame[[c for c in DAILY_COLUMNS if c in frame.columns]]
+        store.upsert_daily(frame, db)
+    if signals:
+        # asof 在 DuckDB 里是保留字（AS OF），列名统一加双引号
+        keys = list(signals[0].keys())
+        sql = "INSERT OR REPLACE INTO signals (%s) VALUES (%s)" % (
+            ",".join(f'"{k}"' for k in keys),
+            ",".join("?" for _ in keys),
+        )
+        with duckdb_conn.connect(db) as conn:
             conn.executemany(sql, [tuple(row[k] for k in keys) for row in signals])
-        conn.commit()
-    finally:
-        conn.close()
     return db
+
+
+# ---------------------------------------------------------------------------
+# 读库小工具（测试直接断言 DuckDB paper_* 表时用）
+# ---------------------------------------------------------------------------
+def fetch_rows(path: str | Path, sql: str, params: list | tuple = ()) -> list[dict]:
+    """只读查询临时 DuckDB，返回 ``[{列名: 值}]``。"""
+    with duckdb_conn.connect(path, read_only=True) as conn:
+        return duckdb_conn.fetch_dicts(conn, sql, list(params))
+
+
+def execute_sql(path: str | Path, sql: str, params: list | tuple = ()) -> None:
+    """在临时 DuckDB 上执行一条写 SQL（测试构造边界状态用）。"""
+    with duckdb_conn.connect(path) as conn:
+        conn.execute(sql, list(params))
 
 
 # ---------------------------------------------------------------------------

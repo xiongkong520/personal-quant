@@ -1,6 +1,6 @@
 """本地 API 单测（契约 §4 / §9）：TestClient 打满全部端点，含 /api/backtest 404 分支。
 
-全部离线：fixture SQLite + 临时目录，不联网、不依赖 data-dev / frontend-dev 的产物。
+全部离线：fixture DuckDB + Parquet 行情 + 临时目录，不联网、不依赖 data-dev / frontend-dev 的产物。
 """
 from __future__ import annotations
 

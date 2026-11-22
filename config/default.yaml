@@ -7,7 +7,10 @@ symbols:
 
 data:
   dir: data
-  db: data/db/quant.db
+  # 状态库（signals / paper_*）用 DuckDB；行情的 Parquet 根目录由 data.db 推导到
+  # data/parquet（约定：.../db/xxx.duckdb → .../parquet；也可显式配置 data.parquet_dir）
+  db: data/db/quant.duckdb
+  parquet_dir: data/parquet
   adjust: qfq            # 前复权
   daily_start: "2022-01-01"
   minute_period: 5       # 5 分钟线

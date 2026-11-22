@@ -1,7 +1,7 @@
 """本地 FastAPI 服务 + 静态看板挂载（契约 §4 / §9）。
 
 端点：
-- ``GET /api/health``   健康检查（信号条数、数据库路径、服务时间）
+- ``GET /api/health``   健康检查（信号条数、DuckDB 状态库路径、服务时间；只读连接）
 - ``GET /api/signals``  契约 §4 信号 JSON 列表（按 asof 倒序，可 ?limit= / ?symbol=）
 - ``GET /api/paper``    模拟盘账户快照（现金/权益/持仓/今日盈亏/累计收益/交易胜率/最近订单）
 - ``GET /api/equity``   净值曲线数组（``[{ts,cash,market_value,equity}]``，可 ?limit=）
@@ -16,17 +16,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import duckdb
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from quant.config import PROJECT_ROOT, load_config, project_path
+from quant.data import db as dbmod
 from quant.paper import engine
 
 TZ = timezone(timedelta(hours=8))
@@ -56,45 +57,39 @@ def _safe_db_path(cfg: dict[str, Any]) -> Path | None:
         return None
 
 
-def _open_readonly(path: Path) -> sqlite3.Connection | None:
-    if not path.is_file():
-        return None
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
-    except sqlite3.Error:
-        return None
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-    ).fetchone()
-    return row is not None
-
-
 def _read_signal_rows(cfg: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-    """从 signals 表读原始行（只读连接；库/表不存在返回 []）。"""
-    db = _safe_db_path(cfg)
-    conn = _open_readonly(db) if db else None
-    if conn is None:
+    """从 DuckDB ``signals`` 表读原始行（**只读连接**；库/表不存在返回 []）。"""
+    db_file = _safe_db_path(cfg)
+    if db_file is None:
         return []
     try:
-        if not _table_exists(conn, "signals"):
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT * FROM signals ORDER BY COALESCE(asof, created_at, '') DESC, signal_id DESC LIMIT ?",
-                (int(limit),),
-            ).fetchall()
-        except sqlite3.Error:  # 列缺失等异常时退化为无序读取
-            rows = conn.execute("SELECT * FROM signals LIMIT ?", (int(limit),)).fetchall()
-        return [dict(row) for row in rows]
-    except sqlite3.Error:
+        with dbmod.connect(db_file, read_only=True) as conn:
+            if not dbmod.table_exists(conn, "signals"):
+                return []
+            try:
+                return dbmod.fetch_dicts(
+                    conn,
+                    "SELECT * FROM signals ORDER BY COALESCE(\"asof\", created_at, '') DESC, signal_id DESC LIMIT ?",
+                    [int(limit)],
+                )
+            except duckdb.Error:  # 列缺失等异常时退化为无序读取
+                return dbmod.fetch_dicts(
+                    conn, "SELECT * FROM signals LIMIT ?", [int(limit)]
+                )
+    except (FileNotFoundError, dbmod.DatabaseUnavailable, duckdb.Error, OSError):
         return []
-    finally:
-        conn.close()
+
+
+def _count_signals(cfg: dict[str, Any]) -> int:
+    """signals 表行数（只读连接；库/表不存在返回 0）。"""
+    db_file = _safe_db_path(cfg)
+    if db_file is None:
+        return 0
+    try:
+        with dbmod.connect(db_file, read_only=True) as conn:
+            return dbmod.count_rows(conn, "signals")
+    except (FileNotFoundError, dbmod.DatabaseUnavailable, duckdb.Error, OSError):
+        return 0
 
 
 def _parse_top_features(raw: Any) -> list[dict[str, Any]]:
@@ -275,18 +270,7 @@ def _signals_payload(cfg: dict[str, Any], limit: int = 200, symbol: str | None =
 
 def _health_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     db = _safe_db_path(cfg)
-    signal_count = 0
-    if db is not None:
-        conn = _open_readonly(db)
-        if conn is not None:
-            try:
-                if _table_exists(conn, "signals"):
-                    row = conn.execute("SELECT COUNT(*) FROM signals").fetchone()
-                    signal_count = int(row[0]) if row else 0
-            except sqlite3.Error:
-                signal_count = 0
-            finally:
-                conn.close()
+    signal_count = _count_signals(cfg)
     return {
         "status": "ok",
         "ok": True,
