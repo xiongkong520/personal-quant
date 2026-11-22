@@ -47,10 +47,11 @@ jobs:
           python -m quant.cli index-train 2>&1 | tail -25
           python -m quant.cli index-backtest 2>&1 | tail -25
 
-      - name: 生成信号与市场快照
+      - name: 生成信号、市场快照与重大事件
         run: |
           python -m quant.cli signal 2>&1 | tail -6
           python -m quant.cli market 2>&1 | tail -6
+          python -m quant.cli events 2>&1 | tail -6
 
       - name: 推送到 Cloudflare（缺 token 时跳过）
         env:
