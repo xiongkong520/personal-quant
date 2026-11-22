@@ -1,0 +1,77 @@
+name: Daily Quant
+
+on:
+  schedule:
+    # UTC 09:30 = 北京时间 17:30（A股收盘后），周一至周五
+    - cron: "30 9 * * 1-5"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/daily-quant.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  daily:
+    name: 数据 → 训练 → 回测 → 推送
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: 拉取行情数据
+        run: |
+          python -m quant.cli fetch --symbols 600519,000001,300750 --start 2024-01-01 2>&1 | tail -8
+
+      - name: 个股模型训练 + walk-forward 回测
+        run: |
+          python -m quant.cli train 2>&1 | tail -25
+          python -m quant.cli backtest 2>&1 | tail -25
+
+      - name: 指数模型训练 + 回测
+        run: |
+          python -m quant.cli index-train 2>&1 | tail -25
+          python -m quant.cli index-backtest 2>&1 | tail -25
+
+      - name: 生成信号与市场快照
+        run: |
+          python -m quant.cli signal 2>&1 | tail -6
+          python -m quant.cli market 2>&1 | tail -6
+
+      - name: 推送到 Cloudflare（缺 token 时跳过）
+        env:
+          QUANT_INGEST_TOKEN: ${{ secrets.CF_INGEST_TOKEN }}
+        run: |
+          if [ -z "$QUANT_INGEST_TOKEN" ]; then
+            echo "未配置 CF_INGEST_TOKEN，跳过推送"
+            exit 0
+          fi
+          python -m quant.cli export --target cloudflare 2>&1 | tail -12
+
+      - name: 归档模型与回测摘要
+        run: |
+          mkdir -p models reports
+          cp data/models/model.json models/model.json 2>/dev/null || true
+          cp data/models/index_model.json models/index_model.json 2>/dev/null || true
+          cp data/reports/backtest.md reports/backtest.md 2>/dev/null || true
+          cp data/reports/index_backtest.md reports/index_backtest.md 2>/dev/null || true
+          cp data/reports/market.json reports/market.json 2>/dev/null || true
+          git config user.name "quant-bot"
+          git config user.email "quant-bot@users.noreply.github.com"
+          git add models reports
+          git commit -m "chore: 每日量化训练与回测 $(date -u +%F)" || echo "无变更"
+          git push || echo "push 跳过"

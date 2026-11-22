@@ -13,6 +13,8 @@ export interface Env {
   WORKER_VERSION?: string;
   /** 限流（次/分钟/客户端 IP），默认 120；测试可调小/调大 */
   RATE_LIMIT_PER_MIN?: string;
+  /** 测试用：设为 "1" 时忽略交易时段限制强制刷新（正式环境不要设置） */
+  FORCE_LIVE_REFRESH?: string;
   /** 可信 IP 白名单（逗号分隔；支持精确 IP 与 a.b.c.* 前缀通配）：
    *  这些 IP 免人机验证、免限流，用于开发测试与自动化验收 */
   TRUSTED_IPS?: string;

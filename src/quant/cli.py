@@ -82,6 +82,32 @@ def cmd_market(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_index_train(args: argparse.Namespace) -> int:
+    from quant.model.index_model import train
+
+    cfg = load_config(args.config)
+    symbols = _symbols(args.symbols) if args.symbols else None
+    result = train(refresh=not args.reuse_cache, symbols=symbols)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_index_backtest(args: argparse.Namespace) -> int:
+    from quant.model.index_model import run_backtest
+
+    cfg = load_config(args.config)
+    symbols = _symbols(args.symbols) if args.symbols else None
+    report = run_backtest(start=args.start, end=args.end, refresh=False, symbols=symbols)
+    print(json.dumps({
+        "interval": report["interval"],
+        "n": report["n"],
+        "metrics": report["metrics"],
+        "baselines": {k: {"accuracy": v["accuracy"], "win_rate": v["win_rate"], "total_return": v["total_return"]}
+                      for k, v in report["baselines"].items()},
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     from quant.backtest.engine import run_backtest
 
@@ -145,6 +171,17 @@ def build_parser() -> argparse.ArgumentParser:
     mk = sub.add_parser("market", help="市场整体：指数/情绪/冰点/方向")
     mk.add_argument("--out", default=None)
     mk.set_defaults(func=cmd_market)
+
+    it = sub.add_parser("index-train", help="训练指数方向模型")
+    it.add_argument("--symbols", default=None)
+    it.add_argument("--reuse-cache", action="store_true", help="复用本地缓存，不联网拉最新数据")
+    it.set_defaults(func=cmd_index_train)
+
+    ib = sub.add_parser("index-backtest", help="指数方向模型 walk-forward 回测")
+    ib.add_argument("--start", default="2021-01-01")
+    ib.add_argument("--end", default=None)
+    ib.add_argument("--symbols", default=None)
+    ib.set_defaults(func=cmd_index_backtest)
 
     b = sub.add_parser("backtest", help="回测并生成报告")
     b.add_argument("--start", default=None)

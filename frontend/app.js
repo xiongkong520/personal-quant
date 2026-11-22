@@ -26,7 +26,8 @@
     backtest: "/api/backtest",
     verify: "/api/verify",
     stream: "/api/stream",
-    market: "/api/market"
+    market: "/api/market",
+    stock: "/api/stock"
   };
 
   /* 安全必需白名单：Turnstile 官方组件。除此之外页面不加载任何外部资源。 */
@@ -1031,11 +1032,6 @@
       p.textContent = conf.message;
       wrap.appendChild(p);
     }
-    if (conf.command) {
-      var code = document.createElement("code");
-      code.textContent = conf.command;
-      wrap.appendChild(code);
-    }
     if (conf.note) {
       var note = document.createElement("p");
       note.className = "empty-note";
@@ -1056,7 +1052,7 @@
         title: "静态预览 · 未连接 API",
         message: "当前没有 /api/signals 服务（纯静态预览会以开发模式降级）。",
         command: "python -m quant.cli serve --port 8787",
-        note: "启动本地数据服务后刷新页面即可看到真实信号与指标。",
+        note: "数据服务连接后自动刷新。",
         icon: "i-warning"
       };
     }
@@ -1065,15 +1061,15 @@
         title: "等待云端信号",
         message: "暂无云端信号数据。",
         command: "python -m quant.cli export --target cloudflare",
-        note: "本地推送后，SSE 会实时刷新方向信号与信号表。",
+        note: "数据更新后自动刷新。",
         icon: "i-warning"
       };
     }
     return {
       title: "暂无信号",
-      message: "signals 表为空时会兜底读取 data/reports/signals.json。",
+      message: "暂无信号数据。",
       command: "python -m quant.cli signal",
-      note: "生成信号后点击右上角刷新；页面每 60s 自动轮询。",
+      note: "页面每 60 秒自动刷新。",
       icon: "i-warning"
     };
   }
@@ -1625,7 +1621,7 @@
           title: "云端不提供回测报告",
           message: "回测数据由本地研究环境生成。",
           command: "python -m quant.cli backtest --start 2025-01-01 --end 2026-11-20",
-          note: "运行后查看本地看板 http://127.0.0.1:8787/。",
+          note: "数据更新后自动展示。",
           icon: "i-chart"
         };
       } else if (!conf.message && state.dev) {
@@ -1633,7 +1629,7 @@
           title: "静态预览 · 未连接数据服务",
           message: "启动本地数据服务后可查看回测报告。",
           command: "python -m quant.cli serve --port 8787",
-          note: "或先运行 python -m quant.cli backtest 生成报告。",
+          note: "该区域数据暂未生成。",
           icon: "i-chart"
         };
       } else if (!conf.message) {
@@ -1641,7 +1637,7 @@
           title: "未回测",
           message: "尚未生成回测报告。",
           command: "python -m quant.cli backtest --start 2025-01-01 --end 2026-11-20",
-          note: "报告写入 data/reports/backtest.json，刷新后展示指标与校准图。",
+          note: "回测数据生成后自动展示指标与校准图。",
           icon: "i-chart"
         };
       }
@@ -1755,19 +1751,19 @@
         title: "静态预览 · 未连接数据服务",
         message: "启动本地数据服务后可查看账户、持仓与胜率。",
         command: "python -m quant.cli serve --port 8787",
-        note: "本地看板：http://127.0.0.1:8787/",
+        note: "本地研究环境提供。",
         icon: "i-warning"
       } : IS_CLOUD ? {
         title: "云端不提供模拟盘",
         message: "模拟盘数据由本地研究环境提供。",
         command: "python -m quant.cli serve --port 8787",
-        note: "本地打开 http://127.0.0.1:8787/ 查看账户与净值。",
+        note: "账户与净值数据暂未同步。",
         icon: "i-warning"
       } : {
         title: "模拟盘尚无快照",
         message: "初始化账户并推进一天后，这里显示现金、持仓与胜率。",
         command: "python -m quant.cli paper --init-cash 1000000 --advance 1",
-        note: "数据库写入后 60s 内自动刷新。",
+        note: "数据更新后 60 秒内自动刷新。",
         icon: "i-warning"
       });
       if (B["paper.meta"]) setText(B["paper.meta"], DASH);
@@ -1874,7 +1870,7 @@
         icon: "i-warning"
       } : IS_CLOUD ? {
         title: "云端不提供订单",
-        message: "模拟成交记录只保存在本地 SQLite。",
+        message: "模拟成交记录暂未同步。",
         icon: "i-warning"
       } : {
         title: "暂无订单",
@@ -2296,6 +2292,87 @@
     });
   }
 
+
+  /* ============================== 股票代码查询 ============================== */
+  function ensureStockCard() {
+    var main = $("#main");
+    if (!main) return null;
+    var card = $("#stockResult");
+    if (card) return card;
+    card = document.createElement("section");
+    card.className = "card span-12";
+    card.id = "stockResult";
+    card.hidden = true;
+    card.innerHTML = '<header class="card-head"><div><p class="eyebrow">代码查询</p><h2 id="stockTitle">个股快照</h2></div>' +
+      '<div class="card-meta"><span id="stockMeta">—</span></div></header><div id="stockBody" class="stock-body"></div>';
+    main.insertBefore(card, main.firstChild);
+    return card;
+  }
+  function showStockMessage(text) {
+    var card = ensureStockCard();
+    if (!card) return;
+    card.hidden = false;
+    var body = $("#stockBody");
+    if (body) body.innerHTML = '<p class="muted">' + esc(text) + "</p>";
+    var title = $("#stockTitle");
+    if (title) setText(title, "个股快照");
+    var meta = $("#stockMeta");
+    if (meta) setText(meta, "—");
+  }
+  function renderStockResult(data) {
+    var card = ensureStockCard();
+    if (!card) return;
+    card.hidden = false;
+    var sig = data.signal || {};
+    var prob = sig.prob || {};
+    var dir = sig.direction === "up" ? "看涨" : (sig.direction === "down" ? "看跌" : "震荡");
+    var cls = sig.direction === "up" ? "up" : (sig.direction === "down" ? "down" : "flat");
+    var name = data.name || sig.name || "";
+    var title = $("#stockTitle");
+    if (title) setText(title, (name ? name + " " : "") + (data.symbol || sig.symbol || ""));
+    var meta = $("#stockMeta");
+    if (meta) setText(meta, (sig.asof ? String(sig.asof).slice(0, 16).replace("T", " ") : "—") + " · " + (sig.status === "ok" ? "有效" : (sig.status || "—")));
+    var pct = function (v) { return fmtNum((v || 0) * 100, 1) + "%"; };
+    var body = $("#stockBody");
+    if (!body) return;
+    body.innerHTML =
+      '<div class="stock-grid">' +
+        '<div class="stock-main">' +
+          '<span class="stock-dir ' + cls + '">' + dir + "</span>" +
+          '<b class="stock-price num">' + fmtNum(sig.price) + "</b>" +
+          '<span class="muted">置信度 ' + pct(sig.confidence) + "</span>" +
+        "</div>" +
+        '<div class="stock-probs">' +
+          '<div class="prob-row"><span>看涨</span><b class="num up">' + pct(prob.up) + "</b></div>" +
+          '<div class="prob-row"><span>震荡</span><b class="num">' + pct(prob.flat) + "</b></div>" +
+          '<div class="prob-row"><span>看跌</span><b class="num down">' + pct(prob.down) + "</b></div>" +
+        "</div>" +
+        '<div class="stock-meta">' +
+          '<span>预测周期 ' + esc(sig.horizon || "1d") + "</span>" +
+          '<span>有效期至 ' + esc(String(sig.expires_at || "—").slice(0, 16).replace("T", " ")) + "</span>" +
+        "</div>" +
+      "</div>";
+  }
+  function initStockQuery() {
+    var input = $("#stockQuery");
+    var btn = $("#stockQueryBtn");
+    if (!input || !btn) return;
+    var run = function () {
+      var code = String(input.value || "").trim();
+      if (!/^\d{6}$/.test(code)) { showStockMessage("请输入 6 位股票代码（如 600519）"); return; }
+      showStockMessage("查询中…");
+      getJSON(EP.stock + "?symbol=" + encodeURIComponent(code)).then(function (r) {
+        if (r.challenge) { noteChallenge(); return; }
+        if (r.rateLimited) { startRateLimit(r.retryAfter); return; }
+        if (r.error || !r.data) { showStockMessage("查询失败，请稍后重试"); return; }
+        if (r.data.ok === false) { showStockMessage(r.data.message || "该代码暂未覆盖"); return; }
+        renderStockResult(r.data);
+      });
+    };
+    btn.addEventListener("click", run);
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") run(); });
+  }
+
   function loadSignals() {
     return getJSON(EP.signals + "?limit=200").then(function (r) {
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
@@ -2379,7 +2456,7 @@
             title: "未回测",
             message: msg || "尚未生成回测报告。",
             command: command || "python -m quant.cli backtest",
-            note: "报告写入 data/reports/backtest.json，刷新后展示指标与校准图。",
+            note: "回测数据生成后自动展示指标与校准图。",
             icon: "i-chart"
           };
           renderBacktest();
@@ -2645,6 +2722,7 @@
   }
 
   function bindEvents() {
+    initStockQuery();
     var refresh = $("#refreshBtn");
     if (refresh) refresh.addEventListener("click", function () {
       if (state.gate.blocked) return;

@@ -22,7 +22,8 @@
 import modelJson from "../models/model.json" with { type: "json" };
 
 import { confidenceOf, directionOf, predictProba, validateModel, type QuantModel } from "./model.ts";
-import { d1Health, insertMarketSnapshot, insertSignals, queryLatestMarket, querySignals } from "./db.ts";
+import { refreshMarketLive } from "./market_live.ts";
+import { d1Health, insertMarketSnapshot, insertSignals, queryLatestMarket, querySignals, queryStockName, upsertStockNames } from "./db.ts";
 import { extractIngestToken, MAX_INGEST_BYTES, normalizeSignal, nowShanghai, parseIngestBody, timingSafeEqual } from "./signals.ts";
 import {
   applySecurityHeaders,
@@ -401,6 +402,60 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
   });
 }
 
+// ---------------------------------------------------------------- stock ----
+
+/** GET /api/stock?symbol=600519：个股快照（D1 中已推送的最新信号 + 名称）。 */
+async function handleStock(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  const symbol = (url.searchParams.get("symbol") ?? "").trim();
+  if (!/^\d{6}$/.test(symbol)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, message: "请输入 6 位股票代码" }, 400);
+  }
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const result = await querySignals(env.DB, { symbols: [symbol], latest: true, limit: 1 });
+  const name = (await queryStockName(env.DB, symbol)) ?? "";
+  if (result.items.length === 0) {
+    return jsonResponse(
+      { schema: SCHEMA_VERSION, ok: false, symbol, name, message: "该代码暂无数据（当前仅覆盖已推送标的）" },
+      404,
+    );
+  }
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    symbol,
+    name,
+    signal: result.items[0],
+    updated_at: result.updated_at,
+  });
+}
+
+/** POST /api/stock-names/ingest：本地推送代码→名称映射（x-ingest-token）。 */
+async function handleStockNamesIngest(request: Request, env: Env): Promise<Response> {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
+  }
+  const items = (body as { items?: unknown })?.items;
+  if (!Array.isArray(items)) return errorResponse(400, "invalid_body", "缺少 items");
+  const rows = items
+    .filter((item): item is { symbol: string; name: string } =>
+      Boolean(item) && typeof (item as { symbol?: unknown }).symbol === "string" && typeof (item as { name?: unknown }).name === "string")
+    .map((item) => ({ symbol: item.symbol, name: item.name }));
+  const accepted = await upsertStockNames(env.DB, rows);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted });
+}
+
 // ---------------------------------------------------------------- market ----
 
 /** POST /api/market/ingest：本地推送市场整体快照（x-ingest-token 鉴权）。 */
@@ -628,6 +683,10 @@ async function securityGate(request: Request, env: Env, path: string): Promise<R
 }
 
 export default {
+  /** Cron 触发：盘中刷新市场快照（写 D1，Pages 前端读取） */
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(refreshMarketLive(env));
+  },
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url);
@@ -678,6 +737,16 @@ export default {
         const challenge = await requireChallenge(request, env);
         if (challenge) return applySecurityHeaders(challenge);
         return applySecurityHeaders(handleStream(request, env));
+      }
+      if (path === "/api/stock") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleStock(request, env, url));
+      }
+      if (path === "/api/stock-names/ingest") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleStockNamesIngest(request, env));
       }
       if (path === "/api/market") {
         const guard = methodGuard(request, ["GET"]);
