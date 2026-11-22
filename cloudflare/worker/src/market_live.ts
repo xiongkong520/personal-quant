@@ -46,7 +46,8 @@ async function fetchIndex(cl: { code: string; name: string; secid: string }): Pr
       pct_chg: prev ? (price / prev - 1) * 100 : 0,
       closes,
     };
-  } catch {
+  } catch (err) {
+    console.warn(`[market_live] index kline 失败 ${cl.code}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }
@@ -207,20 +208,23 @@ function nowIsoShanghai(): string {
   );
 }
 
-/** Cron 处理：盘中刷新市场快照；非交易时段直接跳过。 */
-export async function refreshMarketLive(env: Env): Promise<{ ok: boolean; reason?: string }> {
+/** Cron 处理：盘中刷新市场快照；非交易时段直接跳过（force=true 时忽略时段，用于手动刷新）。 */
+export async function refreshMarketLive(env: Env, force = false): Promise<{ ok: boolean; reason?: string }> {
   if (!env.DB) return { ok: false, reason: "no_db" };
-  if (!isTradingSession() && (env.FORCE_LIVE_REFRESH ?? "") !== "1") {
+  if (!force && !isTradingSession() && (env.FORCE_LIVE_REFRESH ?? "") !== "1") {
     return { ok: false, reason: "off_session" };
   }
 
-  const [activity, ...quotes] = await Promise.all([
-    fetchActivity(),
-    ...INDEXES.map((item) => fetchIndex(item)),
-  ]);
+  // 东财接口并发会被限流：改为串行 + 250ms 节流
+  const activity = await fetchActivity();
+  const quotes: IndexQuote[] = [];
+  for (const item of INDEXES) {
+    const quote = await fetchIndex(item);
+    if (quote) quotes.push(quote);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 
   const indices = quotes
-    .filter((quote): quote is IndexQuote => quote !== null)
     .map((quote) => {
       const d = indexDirection(quote.closes);
       return {

@@ -36,3 +36,9 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_market_asof ON market_snapshots (asof DESC);
+
+CREATE TABLE IF NOT EXISTS stock_names (
+  symbol     TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);

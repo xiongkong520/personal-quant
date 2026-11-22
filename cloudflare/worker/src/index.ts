@@ -458,6 +458,18 @@ async function handleStockNamesIngest(request: Request, env: Env): Promise<Respo
 
 // ---------------------------------------------------------------- market ----
 
+/** POST /api/market/refresh：手动触发盘中刷新（x-ingest-token 保护，防滥用）。 */
+async function handleMarketRefresh(request: Request, env: Env): Promise<Response> {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  const result = await refreshMarketLive(env, true);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: result.ok, reason: result.reason ?? null }, 200);
+}
+
 /** POST /api/market/ingest：本地推送市场整体快照（x-ingest-token 鉴权）。 */
 async function handleMarketIngest(request: Request, env: Env): Promise<Response> {
   const token = readIngestToken(env);
@@ -747,6 +759,11 @@ export default {
         const guard = methodGuard(request, ["POST"]);
         if (guard) return applySecurityHeaders(guard);
         return applySecurityHeaders(await handleStockNamesIngest(request, env));
+      }
+      if (path === "/api/market/refresh") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleMarketRefresh(request, env));
       }
       if (path === "/api/market") {
         const guard = methodGuard(request, ["GET"]);

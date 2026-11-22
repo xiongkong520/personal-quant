@@ -34,6 +34,11 @@ export const SCHEMA_STATEMENTS: string[] = [
   created_at TEXT NOT NULL
 )`,
   `CREATE INDEX IF NOT EXISTS idx_market_asof ON market_snapshots (asof DESC)`,
+  `CREATE TABLE IF NOT EXISTS stock_names (
+  symbol TEXT PRIMARY KEY,
+  name   TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`,
 ];
 
 export const SCHEMA_SQL = `${SCHEMA_STATEMENTS.join(";\n\n")};\n`;

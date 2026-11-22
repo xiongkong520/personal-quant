@@ -218,3 +218,39 @@ export async function queryLatestMarket(
     return null;
   }
 }
+
+
+// ------------------------------------------------------------ stock names ----
+
+export async function upsertStockNames(
+  db: D1Database,
+  rows: Array<{ symbol: string; name: string }>,
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  await ensureSchema(db);
+  const now = new Date().toISOString();
+  const statements = rows
+    .filter((r) => /^\d{6}$/.test(r.symbol) && r.name)
+    .map((r) =>
+      db
+        .prepare(
+          `INSERT INTO stock_names (symbol, name, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(symbol) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
+        )
+        .bind(r.symbol, r.name, now),
+    );
+  if (statements.length === 0) return 0;
+  for (let i = 0; i < statements.length; i += 40) {
+    await db.batch(statements.slice(i, i + 40));
+  }
+  return statements.length;
+}
+
+export async function queryStockName(db: D1Database, symbol: string): Promise<string | null> {
+  await ensureSchema(db);
+  const row = await db
+    .prepare(`SELECT name FROM stock_names WHERE symbol = ?`)
+    .bind(symbol)
+    .first<{ name: string }>();
+  return row?.name ?? null;
+}
