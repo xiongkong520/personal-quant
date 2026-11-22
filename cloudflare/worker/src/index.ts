@@ -9,6 +9,10 @@
  *   GET  /api/stream    需 quant_pass：SSE 新信号推送，30s 心跳
  *   GET  /api/model     需 quant_pass：Worker 打包的 §5 模型权重（附加端点）
  *   POST /api/ingest    需 x-ingest-token / Bearer QUANT_INGEST_TOKEN：本地 Python 推送信号
+ *   GET  /api/kline     需 quant_pass：个股日线（D1 klines，最多 250 根）?symbol=&limit=
+ *   POST /api/kline/ingest  需 x-ingest-token：本地批量推送日线（幂等 upsert）
+ *   GET  /api/regime    需 quant_pass：最新大盘状态/情绪/主线/仓位快照
+ *   POST /api/regime/ingest 需 x-ingest-token：本地推送大盘状态快照
  *   其余路径                    静态资源（cloudflare/pages/ 由 frontend-dev 产出；空目录返回提示 JSON）
  *
  * 安全层（详见 src/security.ts）：
@@ -32,10 +36,13 @@ import {
   queryLatestJsonSnapshot,
   queryLatestMarket,
   querySignals,
+  queryKlines,
   queryStockName,
   upsertEvents,
+  upsertKlines,
   upsertStockNames,
 } from "./db.ts";
+import type { KlineRow } from "./db.ts";
 import { extractIngestToken, MAX_INGEST_BYTES, normalizeSignal, nowShanghai, parseIngestBody, timingSafeEqual } from "./signals.ts";
 import {
   applySecurityHeaders,
@@ -535,6 +542,70 @@ async function handleSnapshotGet(request: Request, env: Env, table: "backtest_re
   return jsonResponse({ schema: SCHEMA_VERSION, ok: true, snapshot, updated_at: nowShanghai() }, 200);
 }
 
+// ---------------------------------------------------------- public summary ----
+
+/** GET /api/public/summary：公开只读大盘摘要（不含敏感数据，供移动端插件/第三方展示）。 */
+async function handlePublicSummary(env: Env): Promise<Response> {
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const market = await queryLatestMarket(env.DB);
+  const events = await queryEvents(env.DB, 3);
+  const snapshot = (market?.snapshot ?? {}) as Record<string, unknown>;
+  const indices = Array.isArray(snapshot["indices"]) ? (snapshot["indices"] as Array<Record<string, unknown>>) : [];
+  const sentiment = (snapshot["sentiment"] ?? {}) as Record<string, unknown>;
+  const direction = (snapshot["market_direction"] ?? {}) as Record<string, unknown>;
+  const score = Number(sentiment["score"] ?? 50);
+  const dir = String(direction["direction"] ?? "flat");
+  let state = "range";
+  let label = "震荡";
+  let range = "2-4成";
+  if (score < 20 || (score < 30 && dir === "down")) {
+    state = "ice_watch";
+    label = "冰点布局";
+    range = "0-2成";
+  } else if (score < 40 || dir === "down") {
+    state = "lean_bear";
+    label = "偏空";
+    range = "0-2成";
+  } else if (score > 80 && dir === "up") {
+    state = "offense";
+    label = "进攻";
+    range = "6-8成";
+  } else if (score > 60 && dir === "up") {
+    state = "lean_bull";
+    label = "偏多";
+    range = "4-6成";
+  }
+  return jsonResponse({
+    schema: 1,
+    asof: market?.updated_at ?? nowShanghai(),
+    status: snapshot["asof"] ? "ok" : "empty",
+    market: {
+      indices: indices.map((item) => ({
+        code: item["code"],
+        name: item["name"],
+        price: item["price"],
+        pct_chg: item["pct_chg"],
+        direction: item["direction"],
+      })),
+      sentiment: { score: sentiment["score"], label: sentiment["label"], breadth: sentiment["breadth"] },
+      market_direction: direction,
+    },
+    advice: {
+      state,
+      label,
+      position_range: range,
+      rationale: `情绪 ${score} · 指数方向 ${dir}`,
+      disclaimer: "研究用途，不构成投资建议",
+    },
+    events: events.map((item) => ({
+      title: item["title"],
+      label: item["label"],
+      sentiment: item["sentiment"],
+      published_at: item["published_at"],
+    })),
+  });
+}
+
 // ---------------------------------------------------------------- market ----
 
 /** POST /api/market/refresh：手动触发盘中刷新（x-ingest-token 保护，防滥用）。 */
@@ -587,6 +658,140 @@ async function handleMarket(request: Request, env: Env): Promise<Response> {
     ok: true,
     snapshot: latest.snapshot,
     updated_at: latest.updated_at,
+  });
+}
+
+// ------------------------------------------------------------------ kline ----
+
+/** 单次推送最多行数（控制请求体大小；本地按 200 行/批推送）。 */
+const KLINE_INGEST_MAX_ROWS = 2000;
+/** GET 单次最多返回根数（任务要求 ≤250）。 */
+const KLINE_QUERY_MAX_ROWS = 250;
+
+function asKlineNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+/** POST /api/kline/ingest：本地批量推送日线（x-ingest-token 鉴权，幂等 upsert）。 */
+async function handleKlineIngest(request: Request, env: Env): Promise<Response> {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
+  }
+  const rawItems = Array.isArray(body)
+    ? body
+    : (body as { items?: unknown } | null)?.items;
+  if (!Array.isArray(rawItems)) return errorResponse(400, "invalid_body", "缺少 items");
+  if (rawItems.length > KLINE_INGEST_MAX_ROWS) {
+    return errorResponse(400, "too_many_rows", `单次最多 ${KLINE_INGEST_MAX_ROWS} 行`);
+  }
+  const rows: KlineRow[] = [];
+  let skipped = 0;
+  for (const item of rawItems) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      skipped += 1;
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const symbol = typeof obj["symbol"] === "string" ? obj["symbol"].trim() : "";
+    const tradeDate = typeof obj["trade_date"] === "string" ? obj["trade_date"].trim() : "";
+    const close = asKlineNumber(obj["close"]);
+    if (!/^\d{6}$/.test(symbol) || !/^\d{4}-\d{2}-\d{2}$/.test(tradeDate) || close === null) {
+      skipped += 1;
+      continue;
+    }
+    rows.push({
+      symbol,
+      trade_date: tradeDate,
+      open: asKlineNumber(obj["open"]),
+      high: asKlineNumber(obj["high"]),
+      low: asKlineNumber(obj["low"]),
+      close,
+      volume: asKlineNumber(obj["volume"]),
+      amount: asKlineNumber(obj["amount"]),
+    });
+  }
+  const accepted = await upsertKlines(env.DB, rows);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted, skipped });
+}
+
+/** GET /api/kline?symbol=600519&limit=120：最近日线（人机验证 / 可信 IP）。 */
+async function handleKline(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const symbol = (url.searchParams.get("symbol") ?? "").trim();
+  if (!/^\d{6}$/.test(symbol)) return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码");
+  const limitRaw = Number(url.searchParams.get("limit") ?? url.searchParams.get("days") ?? "120");
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(Math.max(Math.trunc(limitRaw), 1), KLINE_QUERY_MAX_ROWS)
+    : 120;
+  const items = await queryKlines(env.DB, symbol, limit);
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    symbol,
+    limit,
+    count: items.length,
+    items,
+    updated_at: nowShanghai(),
+  });
+}
+
+// ----------------------------------------------------------------- regime ----
+
+/** POST /api/regime/ingest：本地推送大盘状态快照（x-ingest-token 鉴权）。 */
+async function handleRegimeIngest(request: Request, env: Env): Promise<Response> {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
+  }
+  const raw = body as Record<string, unknown> | null;
+  const snapshot =
+    raw && typeof raw["snapshot"] === "object" && raw["snapshot"] !== null ? raw["snapshot"] : raw;
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return errorResponse(400, "invalid_body", "缺少大盘状态快照内容");
+  }
+  const saved = await insertJsonSnapshot(env.DB, "regime_snapshots", snapshot as Record<string, unknown>);
+  const state = (snapshot as Record<string, unknown>)["market_state"];
+  const label = state && typeof state === "object" ? (state as Record<string, unknown>)["label"] : null;
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1, asof: saved.asof, state: label ?? null });
+}
+
+/** GET /api/regime：最新大盘状态快照（人机验证 / 可信 IP）。 */
+async function handleRegime(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const snapshot = await queryLatestJsonSnapshot(env.DB, "regime_snapshots");
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    snapshot,
+    updated_at: snapshot ? nowShanghai() : null,
   });
 }
 
@@ -839,6 +1044,11 @@ export default {
         if (guard) return applySecurityHeaders(guard);
         return applySecurityHeaders(await handleStockNamesIngest(request, env));
       }
+      if (path === "/api/public/summary") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handlePublicSummary(env));
+      }
       if (path === "/api/events") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
@@ -868,6 +1078,26 @@ export default {
         const guard = methodGuard(request, ["POST"]);
         if (guard) return applySecurityHeaders(guard);
         return applySecurityHeaders(await handleSnapshotIngest(request, env, "paper_snapshots"));
+      }
+      if (path === "/api/kline") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleKline(request, env, url));
+      }
+      if (path === "/api/kline/ingest") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleKlineIngest(request, env));
+      }
+      if (path === "/api/regime") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleRegime(request, env));
+      }
+      if (path === "/api/regime/ingest") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleRegimeIngest(request, env));
       }
       if (path === "/api/market/refresh") {
         const guard = methodGuard(request, ["POST"]);

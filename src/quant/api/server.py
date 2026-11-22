@@ -6,6 +6,8 @@
 - ``GET /api/paper``    模拟盘账户快照（现金/权益/持仓/今日盈亏/累计收益/交易胜率/最近订单）
 - ``GET /api/equity``   净值曲线数组（``[{ts,cash,market_value,equity}]``，可 ?limit=）
 - ``GET /api/backtest`` 读取 ``data/reports/backtest.json``，不存在返回 404 + 提示
+- ``GET /api/kline``    个股日线 OHLCV（Parquet）+ MA5/MA10/MA20 + 涨跌幅，?symbol=&days=&period=day
+- ``GET /api/regime``   读取 ``data/reports/regime.json`` 大盘状态快照，不存在返回 404 + 中性提示
 - ``GET /api/stream``   SSE：首帧推一次信号，之后每 30s 心跳
 - ``GET /``             若 ``frontend/index.html`` 存在则返回看板，否则返回 404 提示
 - ``/static/*``         挂载 ``frontend/`` 目录（前端由 frontend-dev 提供，本模块只挂载）
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -26,8 +29,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from quant.config import PROJECT_ROOT, load_config, project_path
+from quant.config import PROJECT_ROOT, cfg_path, load_config, project_path
 from quant.data import db as dbmod
+from quant.data import store as bar_store
 from quant.paper import engine
 
 TZ = timezone(timedelta(hours=8))
@@ -288,6 +292,118 @@ def _backtest_report_path(cfg: dict[str, Any]) -> Path:
     return project_path(report_dir) / "backtest.json"
 
 
+def _reports_dir(cfg: dict[str, Any]) -> Path:
+    """研究产物目录（``data/reports``）。"""
+    return cfg_path(cfg, "data.dir") / "reports"
+
+
+def _finite(value: Any, digits: int = 2) -> float | None:
+    """JSON 里 NaN/Inf 不是合法值：统一转 None，保留 digits 位小数。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return round(number, digits)
+
+
+def _kline_payload(cfg: dict[str, Any], symbol: str, days: int, period: str) -> Any:
+    """读 Parquet 日线 → OHLCV + MA5/10/20 + 涨跌幅（升序，最近 days 根）。"""
+    if period not in {"day", "1d", "d"}:
+        return JSONResponse(
+            status_code=400,
+            content={"schema": SCHEMA_VERSION, "ok": False, "error": "invalid_period",
+                     "message": "period 仅支持 day"},
+        )
+    db = _safe_db_path(cfg)
+    if db is None:
+        return JSONResponse(
+            status_code=503,
+            content={"schema": SCHEMA_VERSION, "ok": False, "error": "kline_unavailable",
+                     "message": "行情数据暂不可用，请稍后重试"},
+        )
+    try:
+        frame = bar_store.read_daily(symbol, db)
+    except (dbmod.DatabaseUnavailable, duckdb.Error, OSError) as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"schema": SCHEMA_VERSION, "ok": False, "error": "kline_unavailable",
+                     "message": f"行情数据读取失败：{type(exc).__name__}"},
+        )
+    if frame is None or len(frame) == 0:
+        return JSONResponse(
+            status_code=404,
+            content={"schema": SCHEMA_VERSION, "ok": False, "symbol": symbol,
+                     "error": "kline_not_found",
+                     "message": "该代码暂无本地行情数据（未采集或未覆盖）"},
+        )
+
+    frame = frame.reset_index(drop=True).sort_values("trade_date")
+    close = frame["close"].astype(float)
+    frame = frame.assign(
+        ma5=close.rolling(5, min_periods=5).mean(),
+        ma10=close.rolling(10, min_periods=10).mean(),
+        ma20=close.rolling(20, min_periods=20).mean(),
+    )
+    tail = frame.tail(int(days))
+    items: list[dict[str, Any]] = []
+    for row in tail.to_dict(orient="records"):
+        items.append(
+            {
+                "trade_date": str(row.get("trade_date") or ""),
+                "open": _finite(row.get("open")),
+                "high": _finite(row.get("high")),
+                "low": _finite(row.get("low")),
+                "close": _finite(row.get("close")),
+                "volume": int(row.get("volume") or 0),
+                "amount": _finite(row.get("amount")),
+                "pct_chg": _finite(row.get("pct_chg")),
+                "ma5": _finite(row.get("ma5"), 3),
+                "ma10": _finite(row.get("ma10"), 3),
+                "ma20": _finite(row.get("ma20"), 3),
+            }
+        )
+    return {
+        "schema": SCHEMA_VERSION,
+        "ok": True,
+        "symbol": symbol,
+        "period": "day",
+        "days": int(days),
+        "count": len(items),
+        "last_trade_date": items[-1]["trade_date"] if items else None,
+        "updated_at": _now_iso(),
+        "items": items,
+    }
+
+
+def _regime_payload(cfg: dict[str, Any]) -> Any:
+    """读 ``data/reports/regime.json``；缺失/损坏返回中性错误（前端展示空态）。"""
+    path = _reports_dir(cfg) / "regime.json"
+    if not path.is_file():
+        return JSONResponse(
+            status_code=404,
+            content={"schema": SCHEMA_VERSION, "ok": False, "error": "regime_not_found",
+                     "message": "暂无大盘状态快照"},
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"schema": SCHEMA_VERSION, "ok": False, "error": "regime_invalid",
+                     "message": f"大盘状态快照读取失败：{type(exc).__name__}"},
+        )
+    if not isinstance(data, dict):
+        return JSONResponse(
+            status_code=500,
+            content={"schema": SCHEMA_VERSION, "ok": False, "error": "regime_invalid",
+                     "message": "大盘状态快照格式不正确"},
+        )
+    updated_at = str(data.get("asof") or data.get("trade_date") or _now_iso())
+    return {"schema": SCHEMA_VERSION, "ok": True, "snapshot": data, "updated_at": updated_at}
+
+
 def _sse(event: str, payload: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -383,6 +499,46 @@ def create_app(cfg: dict[str, Any] | None = None) -> FastAPI:
             "counts": data.get("counts", {}),
             "event_score": data.get("event_score"),
         }
+
+    @app.get("/api/kline")
+    def kline(
+        symbol: str = Query(..., min_length=6, max_length=6, description="6 位股票代码"),
+        days: int = Query(120, ge=1, le=500, description="返回最近 N 根日线"),
+        period: str = Query("day", description="周期，目前仅 day"),
+    ) -> Any:
+        symbol = str(symbol).strip()
+        if not re.fullmatch(r"\d{6}", symbol):
+            return JSONResponse(
+                status_code=400,
+                content={"schema": SCHEMA_VERSION, "ok": False, "error": "invalid_symbol",
+                         "message": "请输入 6 位股票代码"},
+            )
+        return _kline_payload(cfg, symbol, int(days), str(period).strip().lower())
+
+    @app.get("/api/market")
+    def market() -> Any:
+        """本地市场快照（data/reports/market.json；与云端 GET /api/market 同形）。"""
+        path = _reports_dir(cfg) / "market.json"
+        if not path.is_file():
+            return JSONResponse(
+                status_code=404,
+                content={"schema": SCHEMA_VERSION, "ok": False, "error": "market_not_found",
+                         "message": "暂无市场快照"},
+            )
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"schema": SCHEMA_VERSION, "ok": False, "error": "market_invalid",
+                         "message": f"市场快照读取失败：{type(exc).__name__}"},
+            )
+        return {"schema": SCHEMA_VERSION, "ok": True, "snapshot": data,
+                "updated_at": data.get("asof") or data.get("trade_date")}
+
+    @app.get("/api/regime")
+    def regime() -> Any:
+        return _regime_payload(cfg)
 
     @app.get("/api/stream")
     async def stream() -> StreamingResponse:

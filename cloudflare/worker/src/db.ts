@@ -312,7 +312,7 @@ export async function queryEvents(db: D1Database, limit = 60): Promise<Array<Rec
     .filter((item): item is Record<string, unknown> => item !== null);
 }
 
-export type SnapshotTable = "backtest_reports" | "paper_snapshots";
+export type SnapshotTable = "backtest_reports" | "paper_snapshots" | "regime_snapshots";
 
 export async function insertJsonSnapshot(
   db: D1Database,
@@ -340,4 +340,65 @@ export async function queryLatestJsonSnapshot(
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------- klines ----
+
+/** 云端 K 线行（D1 klines 表；供前端 Canvas 蜡烛图）。 */
+export interface KlineRow {
+  symbol: string;
+  trade_date: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number | null;
+  amount: number | null;
+}
+
+/** 批量 UPSERT 日线（幂等；单次 request 内部按 40 条一批提交）。 */
+export async function upsertKlines(db: D1Database, rows: KlineRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  await ensureSchema(db);
+  const statements = rows.map((row) =>
+    db
+      .prepare(
+        `INSERT INTO klines (symbol, trade_date, open, high, low, close, volume, amount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(symbol, trade_date) DO UPDATE SET open = excluded.open, high = excluded.high,
+           low = excluded.low, close = excluded.close, volume = excluded.volume, amount = excluded.amount`,
+      )
+      .bind(
+        row.symbol,
+        row.trade_date,
+        row.open,
+        row.high,
+        row.low,
+        row.close,
+        row.volume,
+        row.amount,
+      ),
+  );
+  for (let i = 0; i < statements.length; i += 40) {
+    await db.batch(statements.slice(i, i + 40));
+  }
+  return statements.length;
+}
+
+/** 最近 limit 根日线，按 trade_date 升序返回。 */
+export async function queryKlines(
+  db: D1Database,
+  symbol: string,
+  limit: number,
+): Promise<KlineRow[]> {
+  await ensureSchema(db);
+  const cap = Math.min(Math.max(Math.trunc(limit), 1), 250);
+  const rows = await db
+    .prepare(
+      `SELECT symbol, trade_date, open, high, low, close, volume, amount
+       FROM klines WHERE symbol = ? ORDER BY trade_date DESC LIMIT ?`,
+    )
+    .bind(symbol, cap)
+    .all<KlineRow>();
+  return (rows.results ?? []).reverse();
 }

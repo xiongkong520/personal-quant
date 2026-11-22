@@ -28,7 +28,9 @@
     stream: "/api/stream",
     market: "/api/market",
     stock: "/api/stock",
-    events: "/api/events"
+    events: "/api/events",
+    kline: "/api/kline",
+    regime: "/api/regime"
   };
 
   /* 安全必需白名单：Turnstile 官方组件。除此之外页面不加载任何外部资源。 */
@@ -320,6 +322,17 @@
     streamPaused: false,
     rows: new Map(),
     eqGeo: null,
+    regime: null,
+    regimeUpdatedAt: null,
+    kline: {
+      symbol: "",
+      days: 120,
+      items: [],
+      cache: new Map(),
+      hover: -1,
+      req: 0,
+      auto: true
+    },
     rendered: { sigTable: "", paper: "", orders: "", backtest: "", equity: "" }
   };
 
@@ -1374,6 +1387,7 @@
   function hydrateSignalRow(tr, sig) {
     tr.innerHTML = signalRowHtml(sig);
     tr.dataset.status = sig.status;
+    tr.dataset.symbol = sig.symbol;
     tr.setAttribute("data-flip-id", sig.id);
     /* 记录初始数值，下一次轮询才能从旧值平滑补间 */
     var seed = [
@@ -1390,6 +1404,7 @@
   function updateSignalRow(tr, sig, prev) {
     if (!prev) { hydrateSignalRow(tr, sig); return; }
     tr.dataset.status = sig.status;
+    tr.dataset.symbol = sig.symbol;
     if (prev.asof !== sig.asof) {
       var timeCell = tr.querySelector(".col-time");
       if (timeCell) {
@@ -2367,6 +2382,7 @@
         if (r.error || !r.data) { showStockMessage("查询失败，请稍后重试"); return; }
         if (r.data.ok === false) { showStockMessage(r.data.message || "该代码暂未覆盖"); return; }
         renderStockResult(r.data);
+        loadKline(code, state.kline.days, { force: false });
       });
     };
     btn.addEventListener("click", run);
@@ -2459,6 +2475,828 @@
     }).join("");
   }
 
+  /* ============================== K 线面板（Canvas 手绘蜡烛图） ============================== */
+  var KLINE_RANGES = [60, 120, 250];
+  var KLINE_MA = [
+    { key: "ma5", color: "#E6EDF7" },
+    { key: "ma10", color: "#F5A623" },
+    { key: "ma20", color: "#4C8DFF" }
+  ];
+  var KLINE_FONT = '9px ui-monospace, "SF Mono", Menlo, monospace';
+
+  function createKlinePanel() {
+    var main = $("#main");
+    if (!main || $("#klineCard")) return;
+    var ranges = KLINE_RANGES.map(function (d) {
+      return '<button type="button" class="kline-tab" role="tab" data-days="' + d +
+        '" aria-selected="' + (d === 120 ? "true" : "false") + '">' + d + "日</button>";
+    }).join("");
+    var sec = document.createElement("section");
+    sec.id = "klineCard";
+    sec.className = "card span-8";
+    sec.setAttribute("aria-labelledby", "klTitle");
+    sec.innerHTML =
+      '<header class="card-head">' +
+        '<h2 class="card-title" id="klTitle">K线<span class="card-sub">日线 · 红涨绿跌</span></h2>' +
+        '<div class="kline-tools">' +
+          '<input id="klineSymbol" class="stock-input kline-input" type="text" inputmode="numeric" maxlength="6" placeholder="代码" aria-label="K线股票代码" />' +
+          '<button class="btn btn-icon" id="klineGo" type="button" title="加载 K 线" aria-label="加载 K 线"><svg class="icon" aria-hidden="true"><use href="#i-chart"/></svg></button>' +
+        '</div>' +
+      '</header>' +
+      '<div class="kline-body">' +
+        '<div class="kline-bar">' +
+          '<div class="kline-tabs" id="klineRange" role="tablist" aria-label="K线周期">' + ranges + '</div>' +
+          '<div class="kline-legend" aria-hidden="true">' +
+            '<span><i class="lg-candle up"></i>涨</span>' +
+            '<span><i class="lg-candle down"></i>跌</span>' +
+            '<span><i class="lg-ma ma5"></i>MA5</span>' +
+            '<span><i class="lg-ma ma10"></i>MA10</span>' +
+            '<span><i class="lg-ma ma20"></i>MA20</span>' +
+          '</div>' +
+          '<span class="kline-meta" id="klineMeta">—</span>' +
+        '</div>' +
+        '<div class="kline-wrap" id="klineWrap">' +
+          '<div class="kline-scroll" id="klineScroll">' +
+            '<canvas id="klineCanvas" role="img" tabindex="0" aria-label="个股日K线图待加载"></canvas>' +
+          '</div>' +
+          '<canvas id="klineAxis" class="kline-axis" aria-hidden="true"></canvas>' +
+          '<div class="kline-skel" id="klineSkel"></div>' +
+          '<div class="kline-empty" id="klineEmpty" hidden></div>' +
+          '<div class="kline-tip" id="klineTip" hidden></div>' +
+        '</div>' +
+      '</div>' +
+      '<footer class="card-foot">' +
+        '<span id="klineFoot">' + (IS_CLOUD ? "云端 D1 日线 · 最多 250 根" : "本地 Parquet 日线 · 价格不复权") + '</span>' +
+        '<span class="foot-right">点击信号表行可切换标的</span>' +
+      '</footer>';
+    var events = $("#eventsCard");
+    main.insertBefore(sec, events ? events.nextSibling : main.firstChild);
+  }
+
+  function createRegimePanel() {
+    var main = $("#main");
+    if (!main || $("#regimeCard")) return;
+    var sec = document.createElement("section");
+    sec.id = "regimeCard";
+    sec.className = "card span-4";
+    sec.setAttribute("aria-labelledby", "rgTitle");
+    sec.innerHTML =
+      '<header class="card-head">' +
+        '<h2 class="card-title" id="rgTitle">大盘状态<span class="card-sub" id="rgSub">情绪 · 主线 · 仓位</span></h2>' +
+        '<div class="card-meta"><span id="rgAsOf">—</span></div>' +
+      '</header>' +
+      '<div class="regime-body" id="rgBody">' +
+        '<div class="rg-state">' +
+          '<div class="rg-state-main"><b class="rg-state-label" id="rgStateLabel">—</b><span class="rg-score num" id="rgScore">—</span><span class="rg-score-unit">分</span></div>' +
+          '<div class="rg-track"><i id="rgFill"></i></div>' +
+          '<div class="rg-state-meta muted" id="rgStateMeta">—</div>' +
+        '</div>' +
+        '<div class="rg-cols">' +
+          '<div class="rg-col"><span class="muted">情绪</span><b class="num" id="rgEmotion">—</b><span class="muted" id="rgEmotionMeta">—</span></div>' +
+          '<div class="rg-col"><span class="muted" id="rgIndexName">沪深300</span><b class="num" id="rgIndex">—</b><span class="muted" id="rgIndexMeta">—</span></div>' +
+        '</div>' +
+        '<div class="rg-block">' +
+          '<div class="col-head"><span>主线 Top5</span><span class="col-meta">当日 / 5日 / 净流入(亿)</span></div>' +
+          '<div class="rg-leaders" id="rgLeaders"><div class="rg-empty">暂无主线数据</div></div>' +
+        '</div>' +
+        '<div class="rg-block rg-position">' +
+          '<div class="col-head"><span>仓位建议</span><span class="col-meta" id="rgPosLabel">—</span></div>' +
+          '<div class="rg-pos-row"><b class="rg-pos-range" id="rgPosRange">—</b><span class="rg-pos-note">研究用途，不构成投资建议</span></div>' +
+          '<p class="rg-rationale" id="rgRationale">—</p>' +
+          '<ul class="rg-triggers" id="rgTriggers"></ul>' +
+        '</div>' +
+        '<details class="rg-why" id="rgWhy" hidden><summary id="rgWhySummary">判断依据</summary><ul id="rgWhyList"></ul></details>' +
+      '</div>' +
+      '<footer class="card-foot"><span>研究用途，不构成投资建议</span><span class="foot-right" id="rgFoot">—</span></footer>';
+    var kline = $("#klineCard");
+    if (kline) main.insertBefore(sec, kline.nextSibling);
+    else {
+      var events = $("#eventsCard");
+      main.insertBefore(sec, events ? events.nextSibling : main.firstChild);
+    }
+  }
+
+  function klineKey(symbol, days) { return symbol + "|" + days; }
+
+  function showKlineLoading() {
+    show($("#klineSkel"), true);
+    show($("#klineEmpty"), false);
+    var canvas = $("#klineCanvas");
+    if (canvas) canvas.style.visibility = "hidden";
+    show($("#klineTip"), false);
+  }
+
+  function showKlineReady() {
+    show($("#klineSkel"), false);
+    show($("#klineEmpty"), false);
+    var canvas = $("#klineCanvas");
+    if (canvas) canvas.style.visibility = "visible";
+  }
+
+  function showKlineMessage(conf) {
+    show($("#klineSkel"), false);
+    show($("#klineTip"), false);
+    var canvas = $("#klineCanvas");
+    if (canvas) canvas.style.visibility = "hidden";
+    var box = $("#klineEmpty");
+    if (!box) return;
+    show(box, true);
+    renderInto(box, conf);
+  }
+
+  function normKlineItems(raw) {
+    var items = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : []);
+    var out = [];
+    items.forEach(function (it) {
+      if (!it || typeof it !== "object") return;
+      var date = String(it.trade_date || it.date || "").slice(0, 10);
+      var close = num(it.close);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isNum(close)) return;
+      out.push({
+        date: date,
+        open: num(it.open),
+        high: num(it.high),
+        low: num(it.low),
+        close: close,
+        volume: num(it.volume) || 0,
+        amount: num(it.amount),
+        pct: num(it.pct_chg),
+        ma5: num(it.ma5),
+        ma10: num(it.ma10),
+        ma20: num(it.ma20)
+      });
+    });
+    out.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    return out.filter(function (it, i, list) { return i === 0 || it.date !== list[i - 1].date; });
+  }
+
+  function computeKlineMA(items) {
+    [5, 10, 20].forEach(function (win) {
+      var key = "ma" + win;
+      for (var i = 0; i < items.length; i += 1) {
+        if (isNum(items[i][key])) continue;
+        if (i + 1 < win) continue;
+        var sum = 0;
+        var ok = true;
+        for (var j = i - win + 1; j <= i; j += 1) {
+          if (!isNum(items[j].close)) { ok = false; break; }
+          sum += items[j].close;
+        }
+        if (ok) items[i][key] = sum / win;
+      }
+    });
+    return items;
+  }
+
+  function setKlineSymbolValue(symbol) {
+    var input = $("#klineSymbol");
+    if (input && input.value !== symbol) input.value = symbol;
+  }
+
+  function setKlineRangeActive(days) {
+    $$("#klineRange .kline-tab").forEach(function (btn) {
+      btn.setAttribute("aria-selected", Number(btn.dataset.days) === Number(days) ? "true" : "false");
+    });
+  }
+
+  function fmtKlineTick(value) {
+    if (!isNum(value)) return DASH;
+    if (Math.abs(value) >= 1000) return Math.round(value).toLocaleString("en-US");
+    return value.toFixed(2);
+  }
+
+  function fmtVolumeShou(volume) {
+    if (!isNum(volume) || volume <= 0) return DASH;
+    var hand = volume / 100;
+    if (hand >= 1e8) return (hand / 1e8).toFixed(2) + "亿手";
+    if (hand >= 1e4) return (hand / 1e4).toFixed(1) + "万手";
+    return Math.round(hand).toLocaleString("en-US") + "手";
+  }
+
+  function fmtAmountYi(amount) {
+    if (!isNum(amount)) return DASH;
+    return (amount / 1e8).toFixed(2) + "亿";
+  }
+
+  function loadKline(symbol, days, options) {
+    var opts = options || {};
+    var sym = String(symbol || "").trim();
+    if (!/^\d{6}$/.test(sym)) {
+      showKlineMessage({ title: "代码不正确", message: "请输入 6 位 A 股代码，例如 600519。", icon: "i-warning" });
+      return Promise.resolve();
+    }
+    var range = KLINE_RANGES.indexOf(Number(days)) >= 0 ? Number(days) : 120;
+    if (!opts.auto) state.kline.auto = false;
+    state.kline.symbol = sym;
+    state.kline.days = range;
+    setKlineSymbolValue(sym);
+    setKlineRangeActive(range);
+    var key = klineKey(sym, range);
+    var cached = state.kline.cache.get(key);
+    if (cached && !opts.force) {
+      state.kline.items = cached;
+      state.kline.hover = -1;
+      showKlineReady();
+      drawKline();
+      setText($("#klineMeta"), sym + " · 至 " + cached[cached.length - 1].date + " · " + cached.length + "根");
+      return Promise.resolve();
+    }
+    var reqId = ++state.kline.req;
+    showKlineLoading();
+    setText($("#klineMeta"), sym + " · " + range + "日 · 加载中");
+    var url = EP.kline + "?symbol=" + encodeURIComponent(sym) + "&days=" + range;
+    return getJSON(url).then(function (r) {
+      if (reqId !== state.kline.req) return;
+      if (r.challenge) {
+        noteChallenge();
+        showKlineMessage({ title: "需要完成访问验证", message: "验证通过后会自动加载 K 线。", icon: "i-lock" });
+        return;
+      }
+      if (r.rateLimited) {
+        startRateLimit(r.retryAfter);
+        showKlineMessage({ title: "请求过于频繁", message: "限流解除后会自动恢复其它区块，可稍后重试 K 线。", icon: "i-warning" });
+        return;
+      }
+      if (r.error) {
+        if (r.error.status === 404) {
+          showKlineMessage(IS_CLOUD ? {
+            title: "暂无云端 K 线",
+            message: "该代码的日线还没有推送到云端。",
+            note: "本地运行 python -m quant.cli export --target cloudflare 推送。",
+            icon: "i-chart"
+          } : {
+            title: "暂无本地行情",
+            message: "该代码没有本地 Parquet 日线（可能未采集）。",
+            command: "python -m quant.cli fetch --symbols " + sym,
+            icon: "i-chart"
+          });
+        } else {
+          showKlineMessage({ title: "K 线加载失败", message: (r.error.message || "网络不可用") + "，可稍后重试。", icon: "i-warning" });
+        }
+        return;
+      }
+      var items = computeKlineMA(normKlineItems(r.data));
+      if (!items.length) {
+        showKlineMessage({ title: "暂无 K 线数据", message: "该代码返回了空数据。", icon: "i-chart" });
+        return;
+      }
+      state.kline.cache.set(key, items);
+      if (state.kline.cache.size > 12) state.kline.cache.clear();
+      state.kline.items = items;
+      state.kline.hover = -1;
+      showKlineReady();
+      drawKline();
+      setText($("#klineMeta"), sym + " · 至 " + items[items.length - 1].date + " · " + items.length + "根");
+    });
+  }
+
+  function niceTicks(lo, hi, count) {
+    var span = hi - lo;
+    if (!(span > 0)) span = Math.abs(hi) || 1;
+    var raw = span / Math.max(2, count);
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var norm = raw / mag;
+    var step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+    var out = [];
+    for (var v = Math.ceil(lo / step) * step; v <= hi + step * 0.001; v += step) {
+      out.push(Math.round(v * 1e6) / 1e6);
+    }
+    return out;
+  }
+
+  function drawKlineAxis(axisCanvas, cssH, dpr, ticks, last) {
+    if (!axisCanvas) return;
+    var axisW = 52;
+    axisCanvas.width = Math.round(axisW * dpr);
+    axisCanvas.height = Math.round(cssH * dpr);
+    axisCanvas.style.width = axisW + "px";
+    axisCanvas.style.height = cssH + "px";
+    var ctx = axisCanvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, axisW, cssH);
+    ctx.font = KLINE_FONT;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#5C6B80";
+    ticks.forEach(function (item) {
+      if (last && Math.abs(item.y - last.y) < 10) return;
+      ctx.fillText(fmtKlineTick(item.v), axisW - 7, item.y);
+    });
+    if (last) {
+      ctx.fillStyle = "rgba(26, 33, 48, 0.96)";
+      ctx.fillRect(0, last.y - 9, axisW, 18);
+      ctx.strokeStyle = "rgba(52, 64, 84, 0.9)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0.5, last.y - 8.5, axisW - 1, 17);
+      ctx.fillStyle = last.color;
+      ctx.textAlign = "center";
+      ctx.font = KLINE_FONT;
+      ctx.fillText(last.text, axisW / 2, last.y);
+    }
+  }
+
+  function drawKline() {
+    var canvas = $("#klineCanvas");
+    var axisCanvas = $("#klineAxis");
+    var wrap = $("#klineWrap");
+    if (!canvas || !wrap) return;
+    var items = state.kline.items || [];
+    if (!items.length) return;
+    var media = window.matchMedia ? window.matchMedia("(max-width: 760px)") : null;
+    var isMobile = Boolean(media && media.matches);
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var axisW = 52;
+    var viewportW = Math.max(240, Math.round((wrap.clientWidth || 640) - axisW));
+    var n = items.length;
+    var barW = Math.max(5.5, Math.min(14, (viewportW - 16) / n));
+    var cssW = Math.max(viewportW, Math.ceil(n * barW) + 16);
+    var cssH = Math.max(260, Math.round(wrap.clientHeight || (isMobile ? 300 : 344)));
+    var needW = Math.round(cssW * dpr);
+    var needH = Math.round(cssH * dpr);
+    if (canvas.width !== needW || canvas.height !== needH) {
+      canvas.width = needW;
+      canvas.height = needH;
+    }
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    var padT = 10, padL = 8, padR = 8, padB = 20, gap = 8;
+    var volH = Math.round(cssH * 0.19);
+    var priceH = cssH - padT - padB - volH - gap;
+    var volTop = padT + priceH + gap;
+    var lo = Infinity, hi = -Infinity;
+    items.forEach(function (it) {
+      [it.low, it.high, it.ma5, it.ma10, it.ma20].forEach(function (v) {
+        if (!isNum(v)) return;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      });
+    });
+    if (!isFinite(lo) || !isFinite(hi)) return;
+    var span = hi - lo;
+    if (!(span > 0)) span = Math.max(Math.abs(hi) * 0.02, 1);
+    lo -= span * 0.06;
+    hi += span * 0.06;
+    var volMax = 1;
+    items.forEach(function (it) { volMax = Math.max(volMax, it.volume || 0); });
+
+    var x = function (i) { return padL + i * barW + barW / 2; };
+    var yPrice = function (v) { return padT + priceH * (1 - (v - lo) / (hi - lo)); };
+    var right = cssW - padR;
+
+    // 网格线（价格轴刻度文字画在固定轴上）
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(230, 237, 247, 0.06)";
+    var tickValues = niceTicks(lo, hi, 5);
+    var axisTicks = tickValues.map(function (v) { return { v: v, y: Math.round(yPrice(v)) + 0.5 }; });
+    axisTicks.forEach(function (item) {
+      ctx.beginPath();
+      ctx.moveTo(padL, item.y);
+      ctx.lineTo(right + 2, item.y);
+      ctx.stroke();
+    });
+    // 成交量基准线
+    ctx.strokeStyle = "rgba(230, 237, 247, 0.08)";
+    ctx.beginPath();
+    ctx.moveTo(padL, Math.round(volTop + volH) + 0.5);
+    ctx.lineTo(right + 2, Math.round(volTop + volH) + 0.5);
+    ctx.stroke();
+
+    // 蜡烛 + 成交量
+    var flat = "#8A94A6";
+    items.forEach(function (it, i) {
+      var cx = x(i);
+      var color = it.close > it.open ? "#FF4D4F" : it.close < it.open ? "#22C55E" : flat;
+      var high = isNum(it.high) ? it.high : Math.max(it.open, it.close);
+      var low = isNum(it.low) ? it.low : Math.min(it.open, it.close);
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(cx) + 0.5, yPrice(high));
+      ctx.lineTo(Math.round(cx) + 0.5, yPrice(low));
+      ctx.stroke();
+      var bodyW = Math.max(1.5, Math.min(barW * 0.66, barW - 2));
+      var top = yPrice(Math.max(it.open, it.close));
+      var bottom = yPrice(Math.min(it.open, it.close));
+      ctx.fillRect(cx - bodyW / 2, top, bodyW, Math.max(1, bottom - top));
+      var vh = Math.max(0.8, ((it.volume || 0) / volMax) * (volH - 2));
+      ctx.globalAlpha = 0.72;
+      ctx.fillRect(cx - bodyW / 2, volTop + volH - vh, bodyW, vh);
+      ctx.globalAlpha = 1;
+    });
+
+    // MA 线
+    KLINE_MA.forEach(function (ma) {
+      ctx.strokeStyle = ma.color;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      var started = false;
+      items.forEach(function (it, i) {
+        var v = it[ma.key];
+        if (!isNum(v)) { started = false; return; }
+        var px = x(i);
+        var py = yPrice(v);
+        if (!started) { ctx.moveTo(px, py); started = true; }
+        else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    });
+
+    // 时间刻度：首末贴边对齐，避免被裁切
+    ctx.fillStyle = "#5C6B80";
+    ctx.font = KLINE_FONT;
+    ctx.textBaseline = "top";
+    var step = Math.max(1, Math.ceil(n / 6));
+    var idxs = [];
+    for (var i = 0; i < n; i += step) idxs.push(i);
+    if (idxs.length && idxs[idxs.length - 1] !== n - 1) {
+      if (n - 1 - idxs[idxs.length - 1] >= step * 0.45) idxs.push(n - 1);
+      else idxs[idxs.length - 1] = n - 1;
+    }
+    idxs.forEach(function (i) {
+      var label = items[i].date.slice(5);
+      if (i === 0) {
+        ctx.textAlign = "left";
+        ctx.fillText(label, padL, cssH - padB + 5);
+      } else if (i === n - 1) {
+        ctx.textAlign = "right";
+        ctx.fillText(label, right, cssH - padB + 5);
+      } else {
+        ctx.textAlign = "center";
+        ctx.fillText(label, x(i), cssH - padB + 5);
+      }
+    });
+
+    // 固定价格轴：刻度 + 最新价标签
+    var last = items[n - 1];
+    var lastColor = last.close > (isNum(last.open) ? last.open : last.close) ? "#FF4D4F"
+      : last.close < (isNum(last.open) ? last.open : last.close) ? "#22C55E" : flat;
+    var tagY = yPrice(last.close);
+    drawKlineAxis(axisCanvas, cssH, dpr, axisTicks, {
+      y: tagY,
+      color: lastColor,
+      text: last.close.toFixed(2)
+    });
+
+    // 十字线
+    var hover = state.kline.hover;
+    if (hover >= 0 && hover < n) {
+      var hx = Math.round(x(hover)) + 0.5;
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = "rgba(230, 237, 247, 0.4)";
+      ctx.beginPath();
+      ctx.moveTo(hx, padT);
+      ctx.lineTo(hx, volTop + volH);
+      ctx.stroke();
+      ctx.restore();
+      var hv = items[hover].close;
+      var hy = yPrice(hv);
+      ctx.fillStyle = "#11161F";
+      ctx.strokeStyle = "#E6EDF7";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(hx, hy, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    canvas.setAttribute(
+      "aria-label",
+      (state.kline.symbol || "") + " 日K线 " + n + " 根，" + items[0].date + " 至 " + last.date +
+      "，最新收盘 " + last.close.toFixed(2)
+    );
+    if (hover >= 0) positionKlineTip(hover);
+  }
+
+  function positionKlineTip(index) {
+    var tip = $("#klineTip");
+    var wrap = $("#klineWrap");
+    var canvas = $("#klineCanvas");
+    var items = state.kline.items || [];
+    var it = items[index];
+    if (!tip || !wrap || !canvas || !it) return;
+    var pct = isNum(it.pct) ? it.pct / 100 : (isNum(it.open) && it.open ? it.close / it.open - 1 : undefined);
+    var cls = isNum(pct) ? (pct > 0 ? "up" : pct < 0 ? "down" : "flat") : "flat";
+    tip.innerHTML =
+      '<div class="kt-row"><span>日期</span><b>' + esc(it.date) + "</b></div>" +
+      '<div class="kt-row"><span>涨跌</span><b class="' + cls + '">' + esc(fmtSignedPct(pct)) + "</b></div>" +
+      '<div class="kt-row"><span>开盘/收盘</span><b>' + esc(fmtKlineTick(it.open)) + " / " + esc(fmtKlineTick(it.close)) + "</b></div>" +
+      '<div class="kt-row"><span>最高/最低</span><b>' + esc(fmtKlineTick(it.high)) + " / " + esc(fmtKlineTick(it.low)) + "</b></div>" +
+      '<div class="kt-row"><span>成交量</span><b>' + esc(fmtVolumeShou(it.volume)) + " · " + esc(fmtAmountYi(it.amount)) + "</b></div>" +
+      '<div class="kt-row"><span>MA5/10/20</span><b>' +
+        esc(fmtKlineTick(it.ma5)) + " / " + esc(fmtKlineTick(it.ma10)) + " / " + esc(fmtKlineTick(it.ma20)) + "</b></div>";
+    show(tip, true);
+    var canvasRect = canvas.getBoundingClientRect();
+    var wrapRect = wrap.getBoundingClientRect();
+    var barW = items.length > 1 ? (canvasRect.width - 64) / items.length : 8;
+    var px = (canvasRect.left - wrapRect.left) + 8 + index * barW + barW / 2;
+    var tw = tip.offsetWidth || 190;
+    var th = tip.offsetHeight || 96;
+    var tx = px + 14;
+    if (tx + tw > wrap.clientWidth - 4) tx = px - tw - 14;
+    tx = Math.max(4, Math.min(tx, Math.max(4, wrap.clientWidth - tw - 4)));
+    var ty = Math.max(6, Math.min(wrap.clientHeight - th - 6, 12));
+    tip.style.transform = "translate3d(" + Math.round(tx) + "px," + Math.round(ty) + "px,0)";
+  }
+
+  function hideKlineTip() {
+    show($("#klineTip"), false);
+  }
+
+  function klineIndexFromEvent(ev) {
+    var canvas = $("#klineCanvas");
+    var items = state.kline.items || [];
+    if (!canvas || !items.length) return -1;
+    var rect = canvas.getBoundingClientRect();
+    if (!rect.width) return -1;
+    var n = items.length;
+    var barW = (rect.width - 64) / n;
+    var idx = Math.floor((ev.clientX - rect.left - 8) / barW);
+    return clamp(idx, 0, n - 1);
+  }
+
+  function initKlineInteractions() {
+    var input = $("#klineSymbol");
+    var go = $("#klineGo");
+    var range = $("#klineRange");
+    var canvas = $("#klineCanvas");
+    if (!input || !go) return;
+    var submit = function () {
+      var code = String(input.value || "").trim();
+      loadKline(code, state.kline.days, { force: false });
+    };
+    go.addEventListener("click", submit);
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); submit(); }
+    });
+    if (range) {
+      range.addEventListener("click", function (ev) {
+        var btn = ev.target.closest ? ev.target.closest(".kline-tab") : null;
+        if (!btn) return;
+        var days = Number(btn.dataset.days);
+        if (KLINE_RANGES.indexOf(days) < 0 || !state.kline.symbol) return;
+        loadKline(state.kline.symbol, days, { force: true });
+      });
+      range.addEventListener("keydown", function (ev) {
+        if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+        var tabs = $$(".kline-tab", range);
+        var idx = tabs.findIndex(function (t) { return t.getAttribute("aria-selected") === "true"; });
+        var next = ev.key === "ArrowRight" ? (idx + 1) % tabs.length : (idx - 1 + tabs.length) % tabs.length;
+        tabs[next].focus();
+        tabs[next].click();
+        ev.preventDefault();
+      });
+    }
+    if (!canvas) return;
+    canvas.addEventListener("pointermove", function (ev) {
+      if (ev.pointerType === "touch") return;
+      if (!state.kline.items.length) return;
+      var idx = klineIndexFromEvent(ev);
+      if (idx === state.kline.hover) return;
+      state.kline.hover = idx;
+      drawKline();
+    });
+    canvas.addEventListener("pointerleave", function () {
+      if (state.kline.hover < 0) return;
+      state.kline.hover = -1;
+      hideKlineTip();
+      drawKline();
+    });
+    canvas.addEventListener("pointerdown", function (ev) {
+      if (ev.pointerType !== "touch") return;
+      var idx = klineIndexFromEvent(ev);
+      state.kline.hover = idx;
+      drawKline();
+    });
+    canvas.addEventListener("keydown", function (ev) {
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight" && ev.key !== "Escape") return;
+      if (ev.key === "Escape") {
+        state.kline.hover = -1;
+        hideKlineTip();
+        drawKline();
+        return;
+      }
+      var n = state.kline.items.length;
+      if (!n) return;
+      var cur = state.kline.hover < 0 ? n - 1 : state.kline.hover;
+      var next = clamp(cur + (ev.key === "ArrowRight" ? 1 : -1), 0, n - 1);
+      state.kline.hover = next;
+      drawKline();
+      ev.preventDefault();
+    });
+    var wrap = $("#klineWrap");
+    if (wrap && window.ResizeObserver) {
+      var pending = 0;
+      var ro = new ResizeObserver(function () {
+        if (pending) cancelAnimationFrame(pending);
+        pending = requestAnimationFrame(function () {
+          pending = 0;
+          if (state.kline.items.length) drawKline();
+        });
+      });
+      ro.observe(wrap);
+    }
+  }
+
+  function initSignalRowKline() {
+    var body = $("#signalsBody");
+    if (!body) return;
+    body.addEventListener("click", function (ev) {
+      var tr = ev.target.closest ? ev.target.closest("tr[data-symbol]") : null;
+      if (!tr) return;
+      var symbol = tr.dataset.symbol;
+      if (!/^\d{6}$/.test(symbol)) return;
+      loadKline(symbol, state.kline.days, { force: true });
+      announce("K 线切换到 " + symbol);
+    });
+  }
+
+  /* ============================== 大盘状态面板 ============================== */
+  function regimeEmptyConf() {
+    return IS_CLOUD ? {
+      title: "暂无大盘状态快照",
+      message: "云端还没有收到大盘状态推送。",
+      note: "本地运行 python -m quant.cli export --target cloudflare 推送。",
+      icon: "i-warning"
+    } : {
+      title: "暂无大盘状态快照",
+      message: "还没有生成 data/reports/regime.json。",
+      command: "python scripts/regime_report.py",
+      note: "生成后刷新即可看到状态/情绪/主线/仓位建议。",
+      icon: "i-warning"
+    };
+  }
+
+  function loadRegime() {
+    return getJSON(EP.regime).then(function (r) {
+      if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
+      if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
+      if (r.error) {
+        state.regime = null;
+        state.regimeUpdatedAt = null;
+        renderRegime();
+        return { kind: r.error.status === 404 ? "empty" : "error" };
+      }
+      var data = r.data || {};
+      var snapshot = data.snapshot && typeof data.snapshot === "object" ? data.snapshot : data;
+      state.regime = snapshot && snapshot.market_state ? snapshot : null;
+      state.regimeUpdatedAt = data.updated_at || (snapshot && snapshot.asof) || null;
+      renderRegime();
+      return { kind: state.regime ? "ok" : "empty" };
+    });
+  }
+
+  function regimeTone(score) {
+    if (!isNum(score)) return "flat";
+    if (score < 30) return "down";
+    if (score > 70) return "up";
+    return "flat";
+  }
+
+  function renderRegime() {
+    var body = $("#rgBody");
+    if (!body) return;
+    var rg = state.regime;
+    var empty = $("#rgEmpty");
+    var title = $("#rgTitle");
+    if (!rg) {
+      var emptyBox = empty;
+      if (!emptyBox) {
+        emptyBox = document.createElement("div");
+        emptyBox.id = "rgEmpty";
+        emptyBox.className = "card-empty";
+        body.replaceChildren(emptyBox);
+      }
+      show(emptyBox, true);
+      renderInto(emptyBox, regimeEmptyConf());
+      if (title) title.innerHTML = '大盘状态<span class="card-sub">情绪 · 主线 · 仓位</span>';
+      setText($("#rgAsOf"), "—");
+      setText($("#rgFoot"), "研究用途，不构成投资建议");
+      return;
+    }
+    if (empty) { empty.remove(); }
+    if (!body.firstElementChild || body.firstElementChild.id === "rgEmpty") {
+      body.innerHTML = '<div class="rg-state">' +
+        '<div class="rg-state-main"><b class="rg-state-label" id="rgStateLabel">—</b><span class="rg-score num" id="rgScore">—</span><span class="rg-score-unit">分</span></div>' +
+        '<div class="rg-track"><i id="rgFill"></i></div>' +
+        '<div class="rg-state-meta muted" id="rgStateMeta">—</div>' +
+      '</div>' +
+      '<div class="rg-cols">' +
+        '<div class="rg-col"><span class="muted">情绪</span><b class="num" id="rgEmotion">—</b><span class="muted" id="rgEmotionMeta">—</span></div>' +
+        '<div class="rg-col"><span class="muted" id="rgIndexName">沪深300</span><b class="num" id="rgIndex">—</b><span class="muted" id="rgIndexMeta">—</span></div>' +
+      '</div>' +
+      '<div class="rg-block"><div class="col-head"><span>主线 Top5</span><span class="col-meta">当日 / 5日 / 净流入(亿)</span></div>' +
+        '<div class="rg-leaders" id="rgLeaders"><div class="rg-empty">暂无主线数据</div></div></div>' +
+      '<div class="rg-block rg-position"><div class="col-head"><span>仓位建议</span><span class="col-meta" id="rgPosLabel">—</span></div>' +
+        '<div class="rg-pos-row"><b class="rg-pos-range" id="rgPosRange">—</b><span class="rg-pos-note">研究用途，不构成投资建议</span></div>' +
+        '<p class="rg-rationale" id="rgRationale">—</p><ul class="rg-triggers" id="rgTriggers"></ul></div>' +
+      '<details class="rg-why" id="rgWhy" hidden><summary id="rgWhySummary">判断依据</summary><ul id="rgWhyList"></ul></details>';
+    }
+
+    var ms = rg.market_state || {};
+    var score = num(ms.score);
+    var label = ms.label || "—";
+    if (title) title.innerHTML = "大盘状态" + '<span class="card-sub">' + esc(label) + "</span>";
+    setText($("#rgStateLabel"), label);
+    tweenNumber($("#rgScore"), score, function (v) { return fmtFixed(v, 1); });
+    var fill = $("#rgFill");
+    if (fill) fill.style.width = clamp(score || 0, 0, 100) + "%";
+    var parts = [];
+    if (isNum(ms.score_parts && ms.score_parts.trend)) parts.push("趋势 " + fmtFixed(ms.score_parts.trend, 1));
+    if (isNum(ms.score_parts && ms.score_parts.emotion)) parts.push("情绪 " + fmtFixed(ms.score_parts.emotion, 1));
+    if (isNum(ms.score_parts && ms.score_parts.volume)) parts.push("量能 " + fmtFixed(ms.score_parts.volume, 1));
+    setText($("#rgStateMeta"), parts.length ? "状态分构成 " + parts.join(" · ") : "状态分 0–100");
+
+    var emo = rg.emotion || {};
+    var emoEl = $("#rgEmotion");
+    if (emoEl) {
+      emoEl.textContent = isNum(emo.score) ? fmtFixed(emo.score, 1) : DASH;
+      emoEl.className = "num " + (emo.state === "ice" ? "down" : emo.state === "hot" ? "up" : "");
+    }
+    var emoMeta = [];
+    if (emo.label) emoMeta.push(emo.label);
+    if (isNum(emo.breadth)) emoMeta.push("宽度 " + fmtPct(emo.breadth));
+    if (isNum(emo.limit_up) || isNum(emo.limit_down)) {
+      emoMeta.push("涨停 " + fmtInt(emo.limit_up) + " / 跌停 " + fmtInt(emo.limit_down));
+    }
+    setText($("#rgEmotionMeta"), emoMeta.join(" · ") || DASH);
+
+    var trend = rg.trend || {};
+    setText($("#rgIndexName"), trend.index || "沪深300");
+    var idxEl = $("#rgIndex");
+    if (idxEl) {
+      idxEl.textContent = isNum(trend.close) ? fmtPrice(trend.close) : DASH;
+      idxEl.className = "num " + (isNum(trend.ret5) && trend.ret5 > 0 ? "up" : isNum(trend.ret5) && trend.ret5 < 0 ? "down" : "");
+    }
+    var idxMeta = [];
+    if (isNum(trend.ret5)) idxMeta.push("5日 " + fmtSignedPct(trend.ret5 / 100));
+    if (isNum(trend.ret20)) idxMeta.push("20日 " + fmtSignedPct(trend.ret20 / 100));
+    if (trend.ma_state) idxMeta.push(trend.ma_state);
+    setText($("#rgIndexMeta"), idxMeta.join(" · ") || DASH);
+
+    var leaders = arr(rg.leaders).slice(0, 5);
+    var box = $("#rgLeaders");
+    if (box) {
+      if (!leaders.length) {
+        box.innerHTML = '<div class="rg-empty">暂无主线数据</div>';
+      } else {
+        box.innerHTML = leaders.map(function (item) {
+          var d1 = num(item.pct_1d);
+          var d5 = num(item.pct_5d);
+          var inflow = num(item.net_inflow);
+          var kind = item.kind === "concept" ? "概念" : item.kind === "industry" ? "行业" : "";
+          return '<div class="rg-leader" title="' + esc(item.tag || "") + '">' +
+            '<span class="rg-leader-name">' + esc(item.name || "—") +
+              (kind ? '<i class="rg-kind">' + kind + "</i>" : "") + "</span>" +
+            '<span class="rg-leader-cell num ' + (isNum(d1) && d1 > 0 ? "up" : isNum(d1) && d1 < 0 ? "down" : "") + '">' +
+              esc(isNum(d1) ? (d1 > 0 ? "+" : "") + fmtFixed(d1, 2) + "%" : DASH) + "</span>" +
+            '<span class="rg-leader-cell num ' + (isNum(d5) && d5 > 0 ? "up" : isNum(d5) && d5 < 0 ? "down" : "") + '">' +
+              esc(isNum(d5) ? (d5 > 0 ? "+" : "") + fmtFixed(d5, 2) + "%" : DASH) + "</span>" +
+            '<span class="rg-leader-cell num ' + (isNum(inflow) && inflow > 0 ? "up" : isNum(inflow) && inflow < 0 ? "down" : "") + '">' +
+              esc(isNum(inflow) ? (inflow > 0 ? "+" : "") + fmtFixed(inflow, 1) : DASH) + "</span>" +
+          "</div>";
+        }).join("");
+      }
+    }
+
+    var pos = rg.position || {};
+    setText($("#rgPosLabel"), pos.label || "仓位建议");
+    setText($("#rgPosRange"), pos.range || DASH);
+    setText($("#rgRationale"), pos.rationale || "—");
+    var triggers = arr(pos.triggers);
+    var triggerBox = $("#rgTriggers");
+    if (triggerBox) {
+      triggerBox.innerHTML = triggers.slice(0, 3).map(function (t) {
+        return "<li>" + esc(t) + "</li>";
+      }).join("");
+    }
+
+    var reasons = arr(ms.reasons);
+    var why = $("#rgWhy");
+    if (why) {
+      why.hidden = reasons.length === 0;
+      setText($("#rgWhySummary"), "判断依据（" + reasons.length + "）");
+      var whyList = $("#rgWhyList");
+      if (whyList) whyList.innerHTML = reasons.map(function (r) { return "<li>" + esc(r) + "</li>"; }).join("");
+    }
+
+    var asof = rg.trade_date || state.regimeUpdatedAt || rg.asof || "";
+    setText($("#rgAsOf"), asof ? String(asof).slice(0, 10) : DASH);
+    var quality = rg.data_quality || {};
+    var footParts = [];
+    if (rg.trade_date) footParts.push("交易日 " + rg.trade_date);
+    if (rg.status && rg.status !== "ok") footParts.push("数据状态 " + rg.status);
+    if (arr(quality.warnings).length) footParts.push("警告 " + quality.warnings.length + " 条");
+    setText($("#rgFoot"), footParts.join(" · ") || "研究用途，不构成投资建议");
+  }
+
+
   function loadSignals() {
     return getJSON(EP.signals + "?limit=200").then(function (r) {
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
@@ -2484,6 +3322,13 @@
       if (latest && latest.id !== state.lastAnnouncedId) {
         state.lastAnnouncedId = latest.id;
         announce("信号更新：" + (latest.name || latest.symbol) + " " + dirView(latest).label);
+      }
+      if (state.kline.auto) {
+        if (latest && /^\d{6}$/.test(latest.symbol) && latest.symbol !== state.kline.symbol) {
+          void loadKline(latest.symbol, state.kline.days, { auto: true });
+        } else if (latest) {
+          state.kline.auto = false;
+        }
       }
       return { kind: "ok" };
     });
@@ -2578,9 +3423,12 @@
     state.inflight = true;
     var btn = $("#refreshBtn");
     if (btn) btn.classList.add("is-loading");
-    return Promise.all([loadSignals(), loadMarket(), loadPaper(), loadEquity(), loadBacktest(), loadEvents()]).then(function (results) {
+    return Promise.all([loadSignals(), loadMarket(), loadPaper(), loadEquity(), loadBacktest(), loadEvents(), loadRegime()]).then(function (results) {
       state.inflight = false;
       if (btn) btn.classList.remove("is-loading");
+      if (reason === "manual" && state.kline.symbol) {
+        void loadKline(state.kline.symbol, state.kline.days, { force: true });
+      }
       evaluateConnection(results);
       if (state.refreshQueued) {
         state.refreshQueued = false;
@@ -2817,6 +3665,8 @@
 
   function bindEvents() {
     initStockQuery();
+    initKlineInteractions();
+    initSignalRowKline();
     var refresh = $("#refreshBtn");
     if (refresh) refresh.addEventListener("click", function () {
       if (state.gate.blocked) return;
@@ -2844,6 +3694,8 @@
     createMarketPanel();
     createIndexStrip();
     createEventsPanel();
+    createKlinePanel();
+    createRegimePanel();
     bindEvents();
     bindDialog();
     bindTabsKeyboard();
@@ -2867,6 +3719,7 @@
       if (IS_CLOUD) startStream();
       else startPolling();
     });
+    void loadKline("600519", 120, { auto: true });
   }
 
   if (document.readyState === "loading") {

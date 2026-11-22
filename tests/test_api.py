@@ -321,3 +321,176 @@ def test_paper_snapshot_on_fresh_account(tmp_path: Path) -> None:
     assert snap["as_of"] is None
 
     assert client.get("/api/equity").json() == []
+
+
+# ---------------------------------------------------------------------------
+# /api/kline —— 日线 OHLCV + MA5/10/20
+# ---------------------------------------------------------------------------
+def _kline_fixture(tmp_path: Path, *, symbol: str = "600519", days: int = 30):
+    """构造连续 30 个交易日的日线 fixture（收盘价线性上涨，便于手算 MA）。"""
+    from datetime import date, timedelta
+
+    bars = []
+    start = date(2026, 1, 5)
+    prev_close = 10.0
+    for i in range(days):
+        day = start + timedelta(days=i)
+        close = round(10.0 + i * 0.1, 2)
+        bars.append(
+            paper_seed.bar(
+                symbol,
+                day.strftime("%Y-%m-%d"),
+                pre_close=prev_close,
+                open=round(close - 0.02, 2),
+                close=close,
+                high=round(close + 0.08, 2),
+                low=round(close - 0.08, 2),
+                volume=100000 + i * 1000,
+            )
+        )
+        prev_close = close
+    db = paper_seed.create_db(tmp_path / "quant.db", bars, [])
+    cfg = paper_seed.make_cfg(db, initial_cash=100000)
+    cfg["backtest"]["report_dir"] = str(tmp_path / "reports")
+    return TestClient(server.create_app(cfg)), bars
+
+
+def test_kline_contract(tmp_path: Path) -> None:
+    client, bars = _kline_fixture(tmp_path)
+    resp = client.get("/api/kline", params={"symbol": "600519", "days": 20})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["schema"] == 1
+    assert body["ok"] is True
+    assert body["symbol"] == "600519"
+    assert body["period"] == "day"
+    assert body["count"] == 20
+    items = body["items"]
+    assert len(items) == 20
+    # 升序 + 最后 20 根
+    dates = [it["trade_date"] for it in items]
+    assert dates == sorted(dates)
+    assert dates[-1] == bars[-1]["trade_date"]
+    assert dates[0] == bars[-20]["trade_date"]
+    for it in items:
+        assert it["open"] == pytest.approx(it["open"])
+        assert it["high"] >= it["close"] >= it["low"]
+        assert it["volume"] > 0
+        assert it["amount"] is not None
+        assert "ma5" in it and "ma10" in it and "ma20" in it
+    # MA 用完整历史计算：最后一根 MA5 = 最近 5 日收盘均值
+    closes = [b["close"] for b in bars]
+    assert items[-1]["ma5"] == pytest.approx(sum(closes[-5:]) / 5, abs=1e-6)
+    assert items[-1]["ma10"] == pytest.approx(sum(closes[-10:]) / 10, abs=1e-6)
+    assert items[-1]["ma20"] == pytest.approx(sum(closes[-20:]) / 20, abs=1e-6)
+
+
+def test_kline_404_and_validation(tmp_path: Path) -> None:
+    client, _bars = _kline_fixture(tmp_path, symbol="600519")
+    missing = client.get("/api/kline", params={"symbol": "999999"})
+    assert missing.status_code == 404
+    assert missing.json()["error"] == "kline_not_found"
+    assert client.get("/api/kline", params={"symbol": "ABCDEF"}).status_code == 400
+    assert client.get("/api/kline", params={"symbol": "600519", "days": 0}).status_code == 422
+    assert client.get("/api/kline", params={"symbol": "600519", "days": 999}).status_code == 422
+    bad_period = client.get("/api/kline", params={"symbol": "600519", "period": "week"})
+    assert bad_period.status_code == 400
+    assert bad_period.json()["error"] == "invalid_period"
+
+
+def test_kline_days_cap_and_limit(tmp_path: Path) -> None:
+    client, bars = _kline_fixture(tmp_path, days=30)
+    # 请求 500 天（上限）只返回已有 30 根
+    body = client.get("/api/kline", params={"symbol": "600519", "days": 500}).json()
+    assert body["count"] == len(bars)
+    # days=5 时只返回最后 5 根
+    body5 = client.get("/api/kline", params={"symbol": "600519", "days": 5}).json()
+    assert body5["count"] == 5
+    assert body5["items"][-1]["trade_date"] == bars[-1]["trade_date"]
+
+
+# ---------------------------------------------------------------------------
+# /api/regime —— 大盘状态快照
+# ---------------------------------------------------------------------------
+def _write_regime(cfg: dict, payload: dict) -> None:
+    from pathlib import Path as _Path
+
+    reports = _Path(cfg["data"]["dir"]) / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "regime.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_regime_returns_snapshot(tmp_path: Path) -> None:
+    cfg = paper_seed.make_cfg(tmp_path / "quant.db", initial_cash=100000)
+    snapshot = {
+        "schema": 1,
+        "asof": "2026-11-22T17:44:24+08:00",
+        "trade_date": "2026-11-20",
+        "status": "ok",
+        "market_state": {"state": "ice_watch", "label": "冰点布局", "score": 24.1},
+        "emotion": {"score": 19.6, "label": "冰点"},
+        "leaders": [{"name": "银行", "pct_1d": 0.21, "pct_5d": 2.55, "net_inflow": 43.12}],
+        "position": {"range": "0-2成", "label": "试错仓位", "triggers": ["试错条件"], "disclaimer": "研究用途，不构成投资建议"},
+    }
+    _write_regime(cfg, snapshot)
+    client = TestClient(server.create_app(cfg))
+    resp = client.get("/api/regime")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["snapshot"]["market_state"]["label"] == "冰点布局"
+    assert body["snapshot"]["position"]["range"] == "0-2成"
+    assert body["updated_at"] == "2026-11-22T17:44:24+08:00"
+
+
+def test_regime_404_neutral(tmp_path: Path) -> None:
+    cfg = paper_seed.make_cfg(tmp_path / "quant.db", initial_cash=100000)
+    client = TestClient(server.create_app(cfg))
+    resp = client.get("/api/regime")
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"] == "regime_not_found"
+    assert "暂无" in body["message"]
+
+
+def test_regime_invalid_json(tmp_path: Path) -> None:
+    cfg = paper_seed.make_cfg(tmp_path / "quant.db", initial_cash=100000)
+    reports = tmp_path / "data" / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "regime.json").write_text("{not json", encoding="utf-8")
+    client = TestClient(server.create_app(cfg))
+    resp = client.get("/api/regime")
+    assert resp.status_code == 500
+    assert resp.json()["error"] == "regime_invalid"
+
+
+# ---------------------------------------------------------------------------
+# /api/market —— 本地市场快照（看板市场面板）
+# ---------------------------------------------------------------------------
+def test_market_returns_snapshot(tmp_path: Path) -> None:
+    cfg = paper_seed.make_cfg(tmp_path / "quant.db", initial_cash=100000)
+    reports = tmp_path / "data" / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "schema": 1,
+        "asof": "2026-11-22T17:22:19+08:00",
+        "trade_date": "2026-11-20",
+        "indices": [{"code": "sh000001", "name": "上证指数", "price": 3533.79, "pct_chg": -1.2}],
+        "sentiment": {"score": 19.6, "label": "冰点"},
+    }
+    (reports / "market.json").write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    client = TestClient(server.create_app(cfg))
+    resp = client.get("/api/market")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["snapshot"]["sentiment"]["label"] == "冰点"
+    assert body["updated_at"] == "2026-11-22T17:22:19+08:00"
+
+
+def test_market_404_neutral(tmp_path: Path) -> None:
+    cfg = paper_seed.make_cfg(tmp_path / "quant.db", initial_cash=100000)
+    client = TestClient(server.create_app(cfg))
+    resp = client.get("/api/market")
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "market_not_found"

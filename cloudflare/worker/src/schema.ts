@@ -62,6 +62,25 @@ export const SCHEMA_STATEMENTS: string[] = [
   payload    TEXT NOT NULL,
   created_at TEXT NOT NULL
 )`,
+  `CREATE TABLE IF NOT EXISTS klines (
+  symbol     TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  open       REAL,
+  high       REAL,
+  low        REAL,
+  close      REAL,
+  volume     REAL,
+  amount     REAL,
+  PRIMARY KEY (symbol, trade_date)
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_klines_symbol_date ON klines (symbol, trade_date DESC)`,
+  `CREATE TABLE IF NOT EXISTS regime_snapshots (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  asof       TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_regime_asof ON regime_snapshots (asof DESC)`,
 ];
 
 export const SCHEMA_SQL = `${SCHEMA_STATEMENTS.join(";\n\n")};\n`;
