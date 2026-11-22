@@ -366,6 +366,24 @@ def create_app(cfg: dict[str, Any] | None = None) -> FastAPI:
                 },
             )
 
+    @app.get("/api/events")
+    def events(limit: int = Query(40, ge=1, le=200, description="最多返回条数")) -> Any:
+        path = cfg_path(cfg, "data.dir") / "reports" / "events.json"
+        if not path.is_file():
+            return JSONResponse(status_code=404, content={"error": "events_not_found", "message": "暂无事件数据"})
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return JSONResponse(status_code=500, content={"error": "events_invalid", "message": f"事件数据读取失败: {exc}"})
+        items = list(data.get("items") or [])[:limit]
+        return {
+            "schema": 1,
+            "ok": True,
+            "items": items,
+            "counts": data.get("counts", {}),
+            "event_score": data.get("event_score"),
+        }
+
     @app.get("/api/stream")
     async def stream() -> StreamingResponse:
         """SSE：首帧推最新信号，之后 30s 心跳（任务书「可选 SSE」）。"""

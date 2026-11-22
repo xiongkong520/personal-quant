@@ -108,6 +108,23 @@ def cmd_index_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_events(args: argparse.Namespace) -> int:
+    from quant.data.events import build_events_snapshot
+
+    cfg = load_config(args.config)
+    snap = build_events_snapshot(limit=args.limit)
+    out = Path(args.out) if args.out else cfg_path(cfg, "data.dir") / "reports" / "events.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({
+        "status": snap["status"],
+        "counts": snap["counts"],
+        "event_score": snap["event_score"],
+        "out": str(out),
+    }, ensure_ascii=False))
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     from quant.backtest.engine import run_backtest
 
@@ -167,6 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--symbols", default=None)
     s.add_argument("--out", default=None)
     s.set_defaults(func=cmd_signal)
+
+    ev = sub.add_parser("events", help="重大事件：利好/利空评分")
+    ev.add_argument("--limit", type=int, default=60)
+    ev.add_argument("--out", default=None)
+    ev.set_defaults(func=cmd_events)
 
     mk = sub.add_parser("market", help="市场整体：指数/情绪/冰点/方向")
     mk.add_argument("--out", default=None)

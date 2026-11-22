@@ -254,3 +254,90 @@ export async function queryStockName(db: D1Database, symbol: string): Promise<st
     .first<{ name: string }>();
   return row?.name ?? null;
 }
+
+
+// ---------------------------------------------------------- events / reports ----
+
+export async function upsertEvents(db: D1Database, items: Array<Record<string, unknown>>): Promise<number> {
+  await ensureSchema(db);
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  for (const item of items) {
+    const title = typeof item["title"] === "string" ? item["title"] : "";
+    if (!title) continue;
+    const id =
+      typeof item["id"] === "string"
+        ? item["id"]
+        : `ev-${now}-${Math.random().toString(36).slice(2, 10)}`;
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO events (id, published_at, source, title, sentiment, score, payload, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET title = excluded.title, sentiment = excluded.sentiment,
+             score = excluded.score, payload = excluded.payload`,
+        )
+        .bind(
+          id,
+          String(item["published_at"] ?? now),
+          String(item["source"] ?? ""),
+          title,
+          String(item["sentiment"] ?? "neutral"),
+          Number(item["score"] ?? 0),
+          JSON.stringify(item),
+          now,
+        ),
+    );
+  }
+  for (let i = 0; i < statements.length; i += 40) {
+    await db.batch(statements.slice(i, i + 40));
+  }
+  return statements.length;
+}
+
+export async function queryEvents(db: D1Database, limit = 60): Promise<Array<Record<string, unknown>>> {
+  await ensureSchema(db);
+  const rows = await db
+    .prepare(`SELECT payload FROM events ORDER BY published_at DESC LIMIT ?`)
+    .bind(Math.min(Math.max(limit, 1), 200))
+    .all<{ payload: string }>();
+  return (rows.results ?? [])
+    .map((row) => {
+      try {
+        return JSON.parse(row.payload) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter((item): item is Record<string, unknown> => item !== null);
+}
+
+export type SnapshotTable = "backtest_reports" | "paper_snapshots";
+
+export async function insertJsonSnapshot(
+  db: D1Database,
+  table: SnapshotTable,
+  payload: Record<string, unknown>,
+): Promise<{ asof: string }> {
+  await ensureSchema(db);
+  const asof = typeof payload["asof"] === "string" ? payload["asof"] : new Date().toISOString();
+  await db
+    .prepare(`INSERT INTO ${table} (asof, payload, created_at) VALUES (?, ?, ?)`)
+    .bind(asof, JSON.stringify(payload), new Date().toISOString())
+    .run();
+  return { asof };
+}
+
+export async function queryLatestJsonSnapshot(
+  db: D1Database,
+  table: SnapshotTable,
+): Promise<Record<string, unknown> | null> {
+  await ensureSchema(db);
+  const row = await db.prepare(`SELECT payload FROM ${table} ORDER BY id DESC LIMIT 1`).first<{ payload: string }>();
+  if (!row) return null;
+  try {
+    return JSON.parse(row.payload) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}

@@ -27,7 +27,8 @@
     verify: "/api/verify",
     stream: "/api/stream",
     market: "/api/market",
-    stock: "/api/stock"
+    stock: "/api/stock",
+    events: "/api/events"
   };
 
   /* 安全必需白名单：Turnstile 官方组件。除此之外页面不加载任何外部资源。 */
@@ -1618,10 +1619,9 @@
       var conf = state.backtestError || {};
       if (IS_CLOUD) {
         conf = {
-          title: "云端不提供回测报告",
-          message: "回测数据由本地研究环境生成。",
-          command: "python -m quant.cli backtest --start 2025-01-01 --end 2026-11-20",
-          note: "数据更新后自动展示。",
+          title: "回测数据暂未同步",
+          message: "云端回测报告同步后会在此展示。",
+          note: "无需操作，自动刷新。",
           icon: "i-chart"
         };
       } else if (!conf.message && state.dev) {
@@ -1754,10 +1754,9 @@
         note: "本地研究环境提供。",
         icon: "i-warning"
       } : IS_CLOUD ? {
-        title: "云端不提供模拟盘",
-        message: "模拟盘数据由本地研究环境提供。",
-        command: "python -m quant.cli serve --port 8787",
-        note: "账户与净值数据暂未同步。",
+        title: "模拟盘数据暂未同步",
+        message: "云端模拟盘快照同步后会在此展示。",
+        note: "无需操作，自动刷新。",
         icon: "i-warning"
       } : {
         title: "模拟盘尚无快照",
@@ -1869,8 +1868,8 @@
         command: "python -m quant.cli serve --port 8787",
         icon: "i-warning"
       } : IS_CLOUD ? {
-        title: "云端不提供订单",
-        message: "模拟成交记录暂未同步。",
+        title: "订单数据暂未同步",
+        message: "模拟成交记录同步后会在此展示。",
         icon: "i-warning"
       } : {
         title: "暂无订单",
@@ -2035,8 +2034,8 @@
         command: "python -m quant.cli serve --port 8787",
         icon: "i-chart"
       } : IS_CLOUD ? {
-        title: "云端不提供净值曲线",
-        message: "净值数据来自本地模拟盘。",
+        title: "净值数据暂未同步",
+        message: "模拟盘净值同步后会在此展示。",
         icon: "i-chart"
       } : {
         title: "暂无净值曲线",
@@ -2279,6 +2278,7 @@
     }
     setText($("#mktDirMeta"), "置信度 " + fmtNum((md.confidence || 0) * 100, 1) + "%");
     setText($("#mktUpdated"), "更新 " + fmtClock(updatedAt || snapshot.asof) + " · 收盘数据");
+    renderIndexStrip();
   }
   function loadMarket() {
     return getJSON(EP.market).then(function (r) {
@@ -2373,6 +2373,92 @@
     input.addEventListener("keydown", function (e) { if (e.key === "Enter") run(); });
   }
 
+
+  /* ============================== 顶部指数条 ============================== */
+  function createIndexStrip() {
+    if ($("#indexStrip")) return;
+    var header = document.querySelector("header");
+    if (!header || !header.parentNode) return;
+    var strip = document.createElement("div");
+    strip.id = "indexStrip";
+    strip.className = "index-strip";
+    strip.hidden = true;
+    strip.innerHTML = '<div class="index-strip-inner" id="indexStripInner"></div>';
+    header.parentNode.insertBefore(strip, header.nextSibling);
+  }
+  function renderIndexStrip() {
+    var strip = $("#indexStrip");
+    var inner = $("#indexStripInner");
+    if (!strip || !inner) return;
+    var indices = (state.market && state.market.indices) || [];
+    if (!indices.length) { strip.hidden = true; return; }
+    strip.hidden = false;
+    inner.innerHTML = indices.map(function (it) {
+      var chg = Number(it.pct_chg || 0);
+      var cls = chg > 0 ? "up" : (chg < 0 ? "down" : "flat");
+      return '<span class="idx-chip">' +
+        '<span class="idx-chip-name">' + esc(it.name) + '</span>' +
+        '<b class="idx-chip-px num">' + fmtNum(it.price) + '</b>' +
+        '<span class="idx-chip-chg num ' + cls + '">' + (chg > 0 ? "+" : "") + fmtNum(chg) + '%</span>' +
+      '</span>';
+    }).join("");
+  }
+
+  /* ============================== 重大事件（利好利空） ============================== */
+  function createEventsPanel() {
+    var main = $("#main");
+    if (!main || $("#eventsCard")) return;
+    var sec = document.createElement("section");
+    sec.className = "card span-12";
+    sec.id = "eventsCard";
+    sec.setAttribute("aria-labelledby", "evTitle");
+    sec.innerHTML = '<header class="card-head"><div><p class="eyebrow">事件驱动</p>' +
+      '<h2 id="evTitle">重大事件 · 利好利空</h2></div>' +
+      '<div class="card-meta"><span id="evStats">—</span></div></header>' +
+      '<div id="evList" class="event-list"><div class="mkt-empty">暂无事件数据</div></div>';
+    var market = $("#marketCard");
+    if (market && market.nextSibling) main.insertBefore(sec, market.nextSibling);
+    else main.insertBefore(sec, main.firstChild);
+  }
+  function loadEvents() {
+    return getJSON(EP.events + "?limit=40").then(function (r) {
+      if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
+      if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
+      if (r.error) { return { kind: r.error.status === 404 ? "empty" : "error" }; }
+      var items = (r.data && (r.data.items || (r.data.snapshot && r.data.snapshot.items))) || [];
+      state.events = items;
+      renderEvents();
+      return { kind: items.length ? "ok" : "empty" };
+    });
+  }
+  function renderEvents() {
+    var list = $("#evList");
+    if (!list) return;
+    var items = state.events || [];
+    var stats = $("#evStats");
+    if (!items.length) {
+      list.innerHTML = '<div class="mkt-empty">暂无事件数据</div>';
+      if (stats) setText(stats, "—");
+      return;
+    }
+    var bull = items.filter(function (x) { return x.sentiment === "bullish"; }).length;
+    var bear = items.filter(function (x) { return x.sentiment === "bearish"; }).length;
+    var neutral = items.length - bull - bear;
+    if (stats) setText(stats, "利好 " + bull + " · 利空 " + bear + " · 中性 " + neutral);
+    list.innerHTML = items.slice(0, 40).map(function (it) {
+      var cls = it.sentiment === "bullish" ? "bull" : (it.sentiment === "bearish" ? "bear" : "neu");
+      var time = String(it.published_at || "").slice(5, 16).replace("T", " ");
+      var syms = (it.symbols || []).join(" ");
+      return '<div class="event-item ' + cls + '">' +
+        '<span class="event-tag">' + esc(it.label || "中性") + '</span>' +
+        '<span class="event-time muted num">' + esc(time) + '</span>' +
+        '<span class="event-title">' + esc(it.title) + '</span>' +
+        (syms ? '<span class="event-syms muted num">' + esc(syms) + '</span>' : '') +
+        '<span class="event-src muted">' + esc(it.source || "") + '</span>' +
+      '</div>';
+    }).join("");
+  }
+
   function loadSignals() {
     return getJSON(EP.signals + "?limit=200").then(function (r) {
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
@@ -2411,7 +2497,14 @@
         if (r.error.status === 404 || !state.paper) { state.paper = null; renderPaper(); return { kind: r.error.status === 404 ? "empty" : "error" }; }
         return { kind: "error", error: r.error };
       }
-      state.paper = normPaper(r.data);
+      var paperPayload = (r.data && r.data.snapshot) ? r.data.snapshot : r.data;
+      state.paper = normPaper(paperPayload);
+      if (IS_CLOUD && state.paper && state.paper.curve && state.paper.curve.length) {
+        state.equity = state.paper.curve.map(function (pt) {
+          return { ts: pt.ts, equity: pt.equity, cash: pt.cash, marketValue: pt.market_value };
+        });
+        renderEquity();
+      }
       state.lastOkAt = Date.now();
       renderPaper();
       renderStatus();
@@ -2471,7 +2564,8 @@
         renderBacktest();
         return { kind: "error", error: r.error };
       }
-      state.backtest = normBacktest(r.data);
+      var btPayload = (r.data && r.data.snapshot) ? r.data.snapshot : r.data;
+      state.backtest = normBacktest(btPayload);
       renderBacktest();
       return { kind: state.backtest ? "ok" : "empty" };
     });
@@ -2484,7 +2578,7 @@
     state.inflight = true;
     var btn = $("#refreshBtn");
     if (btn) btn.classList.add("is-loading");
-    return Promise.all([loadSignals(), loadMarket(), loadPaper(), loadEquity(), loadBacktest()]).then(function (results) {
+    return Promise.all([loadSignals(), loadMarket(), loadPaper(), loadEquity(), loadBacktest(), loadEvents()]).then(function (results) {
       state.inflight = false;
       if (btn) btn.classList.remove("is-loading");
       evaluateConnection(results);
@@ -2748,6 +2842,8 @@
   function init() {
     collectDom();
     createMarketPanel();
+    createIndexStrip();
+    createEventsPanel();
     bindEvents();
     bindDialog();
     bindTabsKeyboard();

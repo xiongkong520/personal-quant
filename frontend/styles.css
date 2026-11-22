@@ -1086,3 +1086,20 @@ dialog::backdrop { background: rgba(5, 7, 11, 0.68); }
 .stock-probs { display: grid; gap: 4px; }
 .prob-row { display: flex; justify-content: space-between; font-size: 13px; }
 .stock-meta { display: grid; gap: 4px; color: var(--text-2); font-size: 12px; }
+
+/* ============================== 指数条 & 事件面板 ============================== */
+.index-strip { border-bottom: 1px solid var(--border); background: var(--bg-1); overflow-x: auto; }
+.index-strip-inner { display: flex; gap: 18px; padding: 8px 16px; min-width: max-content; }
+.idx-chip { display: inline-flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.idx-chip-name { color: var(--text-1); }
+.idx-chip-px { font-size: 14px; font-family: ui-monospace, "SF Mono", monospace; }
+.idx-chip-chg.up { color: var(--up); } .idx-chip-chg.down { color: var(--down); } .idx-chip-chg.flat { color: var(--flat); }
+.event-list { display: grid; gap: 2px; max-height: 460px; overflow-y: auto; }
+.event-item { display: grid; grid-template-columns: 46px 78px 1fr auto auto; gap: 10px; align-items: center; padding: 7px 2px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.event-item:last-child { border-bottom: none; }
+.event-tag { display: inline-flex; justify-content: center; padding: 2px 6px; border-radius: 6px; font-size: 12px; border: 1px solid var(--border); }
+.event-item.bull .event-tag { color: var(--up); border-color: rgba(255, 77, 79, .5); background: rgba(255, 77, 79, .1); }
+.event-item.bear .event-tag { color: var(--down); border-color: rgba(34, 197, 94, .5); background: rgba(34, 197, 94, .1); }
+.event-item.neu .event-tag { color: var(--text-1); }
+.event-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 700px) { .event-item { grid-template-columns: 40px 64px 1fr; } .event-src, .event-syms { display: none; } }

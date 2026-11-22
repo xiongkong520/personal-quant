@@ -39,6 +39,29 @@ export const SCHEMA_STATEMENTS: string[] = [
   name   TEXT NOT NULL,
   updated_at TEXT NOT NULL
 )`,
+  `CREATE TABLE IF NOT EXISTS events (
+  id           TEXT PRIMARY KEY,
+  published_at TEXT NOT NULL,
+  source       TEXT,
+  title        TEXT NOT NULL,
+  sentiment    TEXT,
+  score        REAL,
+  payload      TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_events_published ON events (published_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS backtest_reports (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  asof       TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`,
+  `CREATE TABLE IF NOT EXISTS paper_snapshots (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  asof       TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`,
 ];
 
 export const SCHEMA_SQL = `${SCHEMA_STATEMENTS.join(";\n\n")};\n`;

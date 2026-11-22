@@ -23,7 +23,19 @@ import modelJson from "../models/model.json" with { type: "json" };
 
 import { confidenceOf, directionOf, predictProba, validateModel, type QuantModel } from "./model.ts";
 import { refreshMarketLive } from "./market_live.ts";
-import { d1Health, insertMarketSnapshot, insertSignals, queryLatestMarket, querySignals, queryStockName, upsertStockNames } from "./db.ts";
+import {
+  d1Health,
+  insertJsonSnapshot,
+  insertMarketSnapshot,
+  insertSignals,
+  queryEvents,
+  queryLatestJsonSnapshot,
+  queryLatestMarket,
+  querySignals,
+  queryStockName,
+  upsertEvents,
+  upsertStockNames,
+} from "./db.ts";
 import { extractIngestToken, MAX_INGEST_BYTES, normalizeSignal, nowShanghai, parseIngestBody, timingSafeEqual } from "./signals.ts";
 import {
   applySecurityHeaders,
@@ -456,6 +468,73 @@ async function handleStockNamesIngest(request: Request, env: Env): Promise<Respo
   return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted });
 }
 
+// -------------------------------------------------------- events / reports ----
+
+/** POST /api/events/ingest：本地推送重大事件（利好/利空评分）。 */
+async function handleEventsIngest(request: Request, env: Env): Promise<Response> {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
+  }
+  const items = (body as { items?: unknown })?.items;
+  if (!Array.isArray(items)) return errorResponse(400, "invalid_body", "缺少 items");
+  const accepted = await upsertEvents(env.DB, items as Array<Record<string, unknown>>);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted });
+}
+
+/** GET /api/events?limit=60：最新重大事件（人机验证 / 可信 IP）。 */
+async function handleEvents(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const limit = Number(url.searchParams.get("limit") ?? "60");
+  const items = await queryEvents(env.DB, Number.isFinite(limit) ? Math.trunc(limit) : 60);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, items, updated_at: nowShanghai() });
+}
+
+/** POST /api/backtest/ingest 或 /api/paper/ingest：推送快照。 */
+async function handleSnapshotIngest(request: Request, env: Env, table: "backtest_reports" | "paper_snapshots"): Promise<Response> {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
+  }
+  const raw = body as Record<string, unknown> | null;
+  const snapshot = raw && typeof raw["snapshot"] === "object" && raw["snapshot"] !== null ? raw["snapshot"] : raw;
+  if (!snapshot || typeof snapshot !== "object") return errorResponse(400, "invalid_body", "缺少快照内容");
+  const saved = await insertJsonSnapshot(env.DB, table, snapshot as Record<string, unknown>);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1, asof: saved.asof });
+}
+
+/** GET /api/backtest 或 /api/paper：最新快照（人机验证 / 可信 IP）。 */
+async function handleSnapshotGet(request: Request, env: Env, table: "backtest_reports" | "paper_snapshots"): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const snapshot = await queryLatestJsonSnapshot(env.DB, table);
+  if (!snapshot) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, message: "数据暂未同步" }, 404);
+  }
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, snapshot, updated_at: nowShanghai() }, 200);
+}
+
 // ---------------------------------------------------------------- market ----
 
 /** POST /api/market/refresh：手动触发盘中刷新（x-ingest-token 保护，防滥用）。 */
@@ -759,6 +838,36 @@ export default {
         const guard = methodGuard(request, ["POST"]);
         if (guard) return applySecurityHeaders(guard);
         return applySecurityHeaders(await handleStockNamesIngest(request, env));
+      }
+      if (path === "/api/events") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleEvents(request, env, url));
+      }
+      if (path === "/api/events/ingest") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleEventsIngest(request, env));
+      }
+      if (path === "/api/backtest") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleSnapshotGet(request, env, "backtest_reports"));
+      }
+      if (path === "/api/backtest/ingest") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleSnapshotIngest(request, env, "backtest_reports"));
+      }
+      if (path === "/api/paper") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleSnapshotGet(request, env, "paper_snapshots"));
+      }
+      if (path === "/api/paper/ingest") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleSnapshotIngest(request, env, "paper_snapshots"));
       }
       if (path === "/api/market/refresh") {
         const guard = methodGuard(request, ["POST"]);
