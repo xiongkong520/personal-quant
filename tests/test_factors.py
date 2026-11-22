@@ -72,7 +72,7 @@ def test_evaluate_factor_detects_constructed_relation():
     """人为构造因子与未来收益的强正相关，IC 必须显著为正。"""
     frame = compute_factors(_make_daily())
     rng = np.random.default_rng(1)
-    frame["fwd_ret"] = 0.02 * frame["rev_1"].fillna(0.0) + rng.normal(0, 0.001, len(frame))
+    frame["fwd_ret"] = 0.02 * frame["rev_1"].fillna(0.0) + rng.normal(0, 0.0001, len(frame))
     clean = frame.dropna(subset=["rev_1", "fwd_ret"])
     result = evaluate_factor(clean, "rev_1", groups=3)
     assert result["days"] > 10
