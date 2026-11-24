@@ -402,3 +402,207 @@ export async function queryKlines(
     .all<KlineRow>();
   return (rows.results ?? []).reverse();
 }
+
+
+// ---------------------------------------------------------------- boards ----
+// 板块行情（Worker Cron 收盘同步写；简化 regime 主线 + 前端市场全景榜使用）
+
+export interface BoardRow {
+  board_name: string;
+  type: string;
+  pct_1d: number | null;
+  pct_5d: number | null;
+  net_inflow: number | null;
+  updated_at: string;
+}
+
+/** 批量 UPSERT 板块行情（幂等；同 (board_name,type) 覆盖更新）。 */
+export async function upsertBoards(db: D1Database, rows: BoardRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  await ensureSchema(db);
+  const statements = rows.map((row) =>
+    db
+      .prepare(
+        `INSERT INTO boards (board_name, type, pct_1d, pct_5d, net_inflow, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(board_name, type) DO UPDATE SET pct_1d = excluded.pct_1d,
+           pct_5d = excluded.pct_5d, net_inflow = excluded.net_inflow, updated_at = excluded.updated_at`,
+      )
+      .bind(row.board_name, row.type, row.pct_1d, row.pct_5d, row.net_inflow, row.updated_at),
+  );
+  for (let i = 0; i < statements.length; i += 40) {
+    await db.batch(statements.slice(i, i + 40));
+  }
+  return statements.length;
+}
+
+/** 板块列表：type=industry/concept 可选；按当日涨幅降序。 */
+export async function queryBoards(
+  db: D1Database,
+  options: { type?: string; limit?: number } = {},
+): Promise<BoardRow[]> {
+  await ensureSchema(db);
+  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 20), 1), 200);
+  const where = options.type ? `WHERE type = ?` : "";
+  const params: unknown[] = options.type ? [options.type] : [];
+  params.push(limit);
+  const result = await db
+    .prepare(
+      `SELECT board_name, type, pct_1d, pct_5d, net_inflow, updated_at FROM boards ${where}
+       ORDER BY pct_1d DESC NULLS LAST, board_name ASC LIMIT ?`,
+    )
+    .bind(...params)
+    .all<BoardRow>();
+  return result.results ?? [];
+}
+
+// ------------------------------------------------------------ intraday ----
+
+/** 盘中指数分时（当日分钟序列，每次覆盖写；供 /api/intraday 与前端分时图）。 */
+export async function upsertIntradayIndex(
+  db: D1Database,
+  code: string,
+  tradeDate: string,
+  payload: Record<string, unknown>,
+  updatedAt: string,
+): Promise<void> {
+  await ensureSchema(db);
+  await db
+    .prepare(
+      `INSERT INTO intraday_index (code, trade_date, updated_at, payload) VALUES (?, ?, ?, ?)
+       ON CONFLICT(code, trade_date) DO UPDATE SET updated_at = excluded.updated_at, payload = excluded.payload`,
+    )
+    .bind(code, tradeDate, updatedAt, JSON.stringify(payload))
+    .run();
+}
+
+/** 最新一条盘中分时（优先当日）。 */
+export async function queryIntradayIndex(
+  db: D1Database,
+  code: string,
+): Promise<{ code: string; trade_date: string; updated_at: string; payload: Record<string, unknown> } | null> {
+  await ensureSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT code, trade_date, updated_at, payload FROM intraday_index
+       WHERE code = ? ORDER BY trade_date DESC LIMIT 1`,
+    )
+    .bind(code)
+    .first<{ code: string; trade_date: string; updated_at: string; payload: string }>();
+  if (!row) return null;
+  try {
+    return { code: row.code, trade_date: row.trade_date, updated_at: row.updated_at, payload: JSON.parse(row.payload) as Record<string, unknown> };
+  } catch {
+    return null;
+  }
+}
+
+// ------------------------------------------------------ market summaries ----
+
+export interface MarketSummaryRow {
+  trade_date: string;
+  session: string;
+  asof: string;
+  summary_text: string;
+  payload: string;
+  created_at: string;
+}
+
+/** 写入/覆盖一条午评或收评（trade_date + session 唯一）。 */
+export async function upsertMarketSummary(
+  db: D1Database,
+  row: Omit<MarketSummaryRow, "payload"> & { payload: Record<string, unknown> },
+): Promise<void> {
+  await ensureSchema(db);
+  await db
+    .prepare(
+      `INSERT INTO market_summaries (trade_date, session, asof, summary_text, payload, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(trade_date, session) DO UPDATE SET asof = excluded.asof,
+         summary_text = excluded.summary_text, payload = excluded.payload, created_at = excluded.created_at`,
+    )
+    .bind(row.trade_date, row.session, row.asof, row.summary_text, JSON.stringify(row.payload), row.created_at)
+    .run();
+}
+
+function parseSummaryRow(row: MarketSummaryRow | null): Record<string, unknown> | null {
+  if (!row) return null;
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(row.payload) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  return {
+    trade_date: row.trade_date,
+    session: row.session,
+    asof: row.asof,
+    summary_text: row.summary_text,
+    payload,
+    created_at: row.created_at,
+  };
+}
+
+/** 最近一条午评 + 最近一条收评。 */
+export async function queryLatestSummaries(
+  db: D1Database,
+): Promise<{ midday: Record<string, unknown> | null; close: Record<string, unknown> | null }> {
+  await ensureSchema(db);
+  const out: { midday: Record<string, unknown> | null; close: Record<string, unknown> | null } = { midday: null, close: null };
+  for (const session of ["midday", "close"] as const) {
+    const row = await db
+      .prepare(`SELECT * FROM market_summaries WHERE session = ? ORDER BY trade_date DESC, asof DESC LIMIT 1`)
+      .bind(session)
+      .first<MarketSummaryRow>();
+    out[session] = parseSummaryRow(row ?? null);
+  }
+  return out;
+}
+
+/** 最近 N 条午评/收评（时间倒序）。 */
+export async function queryMarketSummaries(db: D1Database, limit = 20): Promise<Array<Record<string, unknown>>> {
+  await ensureSchema(db);
+  const cap = Math.min(Math.max(Math.trunc(limit), 1), 100);
+  const rows = await db
+    .prepare(`SELECT * FROM market_summaries ORDER BY trade_date DESC, asof DESC LIMIT ?`)
+    .bind(cap)
+    .all<MarketSummaryRow>();
+  return (rows.results ?? []).map((row) => parseSummaryRow(row) as Record<string, unknown>);
+}
+
+/** 某交易日的市场快照序列（盘中情绪曲线用，时间升序）。 */
+export async function queryMarketHistory(
+  db: D1Database,
+  date: string,
+  limit = 120,
+): Promise<Array<{ asof: string; trade_date: string | null; payload: Record<string, unknown> }>> {
+  await ensureSchema(db);
+  const cap = Math.min(Math.max(Math.trunc(limit), 1), 240);
+  const rows = await db
+    .prepare(
+      `SELECT asof, trade_date, payload FROM market_snapshots
+       WHERE trade_date = ? ORDER BY asof ASC, id ASC LIMIT ?`,
+    )
+    .bind(date, cap)
+    .all<{ asof: string; trade_date: string | null; payload: string }>();
+  return (rows.results ?? []).map((row) => {
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = JSON.parse(row.payload) as Record<string, unknown>;
+    } catch {
+      payload = {};
+    }
+    return { asof: row.asof, trade_date: row.trade_date, payload };
+  });
+}
+
+/** 股票池（stock_names 表；Worker Cron 收盘同步取 40 只）。 */
+export async function queryStockSymbols(db: D1Database, limit = 40): Promise<string[]> {
+  await ensureSchema(db);
+  const cap = Math.min(Math.max(Math.trunc(limit), 1), 200);
+  const rows = await db
+    .prepare(`SELECT symbol FROM stock_names ORDER BY symbol ASC LIMIT ?`)
+    .bind(cap)
+    .all<{ symbol: string }>();
+  return (rows.results ?? []).map((r) => r.symbol).filter((s) => /^\d{6}$/.test(s));
+}

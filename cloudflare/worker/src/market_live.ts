@@ -9,7 +9,7 @@
 import { insertMarketSnapshot } from "./db.ts";
 import type { Env } from "./types.ts";
 
-interface IndexQuote {
+export interface IndexQuote {
   code: string;
   name: string;
   price: number;
@@ -17,14 +17,40 @@ interface IndexQuote {
   closes: number[];
 }
 
-const INDEXES = [
+export const INDEXES = [
   { code: "sh000001", name: "上证指数", secid: "1.000001" },
   { code: "sz399001", name: "深证成指", secid: "0.399001" },
   { code: "sz399006", name: "创业板指", secid: "0.399006" },
   { code: "sh000300", name: "沪深300", secid: "1.000300" },
 ];
 
-async function fetchIndex(cl: { code: string; name: string; secid: string }): Promise<IndexQuote | null> {
+/** 腾讯行情兜底（东财被限流时）：GBK 解码，返回最新价/昨收。 */
+async function fetchTencentQuote(code: string): Promise<{ price: number; prevClose: number } | null> {
+  try {
+    const resp = await fetch(`https://qt.gtimg.cn/q=${code}`, {
+      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)" },
+    });
+    if (!resp.ok) return null;
+    const buffer = await resp.arrayBuffer();
+    let text: string;
+    try {
+      text = new TextDecoder("gbk").decode(buffer);
+    } catch {
+      text = new TextDecoder("utf-8").decode(buffer);
+    }
+    const match = text.match(/="([^"]+)"/);
+    if (!match) return null;
+    const parts = match[1].split("~");
+    const price = Number(parts[3]);
+    const prevClose = Number(parts[4]);
+    if (!Number.isFinite(price) || !Number.isFinite(prevClose) || prevClose === 0) return null;
+    return { price, prevClose };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchIndex(cl: { code: string; name: string; secid: string }): Promise<IndexQuote | null> {
   const url =
     "https://push2his.eastmoney.com/api/qt/stock/kline/get" +
     `?secid=${cl.secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&beg=20240101&end=20500101`;
@@ -52,7 +78,7 @@ async function fetchIndex(cl: { code: string; name: string; secid: string }): Pr
   }
 }
 
-interface Activity {
+export interface Activity {
   up: number;
   down: number;
   flat: number;
@@ -63,7 +89,7 @@ interface Activity {
   asof: string;
 }
 
-async function fetchActivity(): Promise<Activity | null> {
+export async function fetchActivity(): Promise<Activity | null> {
   try {
     const resp = await fetch("https://legulegu.com/stockdata/market-activity", {
       headers: {
@@ -98,7 +124,7 @@ async function fetchActivity(): Promise<Activity | null> {
   }
 }
 
-function computeSentiment(a: Activity): Record<string, unknown> {
+export function computeSentiment(a: Activity): Record<string, unknown> {
   const total = Math.max(1, a.up + a.down);
   const breadth = a.up / total;
   const limitRatio = a.limit_up / Math.max(1, a.limit_up + a.limit_down);
@@ -135,7 +161,7 @@ function computeSentiment(a: Activity): Record<string, unknown> {
   };
 }
 
-function indexDirection(closes: number[]): {
+export function indexDirection(closes: number[]): {
   direction: string;
   prob: { up: number; flat: number; down: number };
   confidence: number;
@@ -186,12 +212,12 @@ function indexDirection(closes: number[]): {
   };
 }
 
-function shanghaiNow(): Date {
+export function shanghaiNow(): Date {
   // 中国无夏令时，UTC+8 固定
   return new Date(Date.now() + 8 * 3600 * 1000);
 }
 
-function isTradingSession(): boolean {
+export function isTradingSession(): boolean {
   const now = shanghaiNow();
   const day = now.getUTCDay(); // 0=周日
   if (day === 0 || day === 6) return false;
@@ -199,7 +225,7 @@ function isTradingSession(): boolean {
   return (minutes >= 9 * 60 + 30 && minutes <= 11 * 60 + 30) || (minutes >= 13 * 60 && minutes <= 15 * 60);
 }
 
-function nowIsoShanghai(): string {
+export function nowIsoShanghai(): string {
   const now = shanghaiNow();
   const pad = (v: number) => String(v).padStart(2, "0");
   return (
@@ -219,7 +245,19 @@ export async function refreshMarketLive(env: Env, force = false): Promise<{ ok: 
   const activity = await fetchActivity();
   const quotes: IndexQuote[] = [];
   for (const item of INDEXES) {
-    const quote = await fetchIndex(item);
+    let quote = await fetchIndex(item);
+    if (!quote) {
+      const fallback = await fetchTencentQuote(item.code);
+      if (fallback) {
+        quote = {
+          code: item.code,
+          name: item.name,
+          price: fallback.price,
+          pct_chg: (fallback.price / fallback.prevClose - 1) * 100,
+          closes: [fallback.prevClose, fallback.price],
+        };
+      }
+    }
     if (quote) quotes.push(quote);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }

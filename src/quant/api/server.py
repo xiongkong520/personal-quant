@@ -39,6 +39,32 @@ SCHEMA_VERSION = 1
 SERVICE_NAME = "personal-quant-api"
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
+#: 全市场搜索的基础股票池（与 scripts/push_stock_pool.py 的 40 只一致）。
+#: 名称/拼音首字母用于本地联想；云端 Worker 侧有一份同样的静态表。
+STOCK_POOL: list[tuple[str, str, str]] = [
+    ("600519", "贵州茅台", "GZMT"), ("000001", "平安银行", "PAYH"), ("300750", "宁德时代", "NDSD"),
+    ("601318", "中国平安", "ZGPA"), ("600036", "招商银行", "ZSYH"), ("000858", "五粮液", "WLY"),
+    ("002594", "比亚迪", "BYD"), ("601899", "紫金矿业", "ZJKY"), ("600900", "长江电力", "CJDL"),
+    ("601088", "中国神华", "ZGSH"), ("600030", "中信证券", "ZXZQ"), ("000651", "格力电器", "GLDQ"),
+    ("000333", "美的集团", "MDJT"), ("600276", "恒瑞医药", "HRYY"), ("300059", "东方财富", "DFCF"),
+    ("002415", "海康威视", "HKWS"), ("600887", "伊利股份", "YLGF"), ("601012", "隆基绿能", "LJLN"),
+    ("600585", "海螺水泥", "HLSN"), ("601166", "兴业银行", "XYYH"), ("000725", "京东方A", "JDFA"),
+    ("601398", "工商银行", "GSYH"), ("601857", "中国石油", "ZGSY"), ("600028", "中国石化", "ZGSH"),
+    ("601988", "中国银行", "ZGYH"), ("601601", "中国太保", "ZGTB"), ("601628", "中国人寿", "ZGRS"),
+    ("600016", "民生银行", "MSYH"), ("600104", "上汽集团", "SQJT"), ("601668", "中国建筑", "ZGJZ"),
+    ("000002", "万科A", "WKA"), ("000063", "中兴通讯", "ZXTX"), ("600009", "上海机场", "SHJC"),
+    ("601888", "中国中免", "ZGZM"), ("603259", "药明康德", "YMKD"), ("688981", "中芯国际", "ZXGJ"),
+    ("688111", "金山办公", "JSBG"), ("300760", "迈瑞医疗", "MRYL"), ("002475", "立讯精密", "LXJM"),
+    ("002352", "顺丰控股", "SFKG"),
+]
+
+#: 指数代码 → 展示名（指数 K 线走 data/raw/index/<code>.csv）。
+INDEX_NAMES: dict[str, str] = {
+    "sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指", "sh000300": "沪深300",
+}
+INDEX_CODE_RE = re.compile(r"^(?:sh|sz)\d{6}$")
+STOCK_CODE_RE = re.compile(r"^\d{6}$")
+
 
 # ---------------------------------------------------------------------------
 # 小工具
@@ -377,6 +403,114 @@ def _kline_payload(cfg: dict[str, Any], symbol: str, days: int, period: str) -> 
     }
 
 
+def _search_items(cfg: dict[str, Any], query: str, limit: int = 12) -> list[dict[str, Any]]:
+    """代码前缀 / 名称包含 / 拼音首字母匹配（本地名称表来自静态股票池）。"""
+    q = query.strip()
+    if not q:
+        return []
+    q_upper = q.upper()
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for symbol, name, initials in STOCK_POOL:
+        score = -1
+        if symbol == q:
+            score = 0
+        elif symbol.startswith(q) and q.isdigit():
+            score = 1
+        elif name == q:
+            score = 2
+        elif name.startswith(q):
+            score = 3
+        elif q in name:
+            score = 4
+        elif initials.startswith(q_upper) and not q.isdigit():
+            score = 5
+        if score >= 0:
+            scored.append((score, len(symbol), {"symbol": symbol, "name": name, "initials": initials}))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in scored[: max(1, min(int(limit), 30))]]
+
+
+def _index_kline_payload(symbol: str, days: int) -> Any:
+    """指数日线：本地缓存 CSV（data/raw/index/<code>.csv）→ OHLCV + MA + 涨跌幅。"""
+    import csv as _csv
+
+    path = PROJECT_ROOT / "data" / "raw" / "index" / f"{symbol}.csv"
+    if not path.is_file():
+        return JSONResponse(
+            status_code=404,
+            content={"schema": SCHEMA_VERSION, "ok": False, "symbol": symbol,
+                     "error": "index_kline_not_found", "message": "该指数暂无本地日线数据"},
+        )
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            for row in _csv.DictReader(fh):
+                try:
+                    rows.append(
+                        {
+                            "trade_date": str(row.get("date") or "")[:10],
+                            "open": float(row["open"]),
+                            "high": float(row["high"]),
+                            "low": float(row["low"]),
+                            "close": float(row["close"]),
+                            "volume": float(row.get("volume") or 0),
+                        }
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except OSError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"schema": SCHEMA_VERSION, "ok": False, "error": "index_kline_unavailable",
+                     "message": f"指数行情读取失败：{type(exc).__name__}"},
+        )
+    rows.sort(key=lambda item: item["trade_date"])
+    rows = rows[-int(days):]
+    closes = [item["close"] for item in rows]
+    items: list[dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        prev = closes[i - 1] if i > 0 else None
+        pct = (row["close"] / prev - 1) * 100 if prev else None
+        items.append(
+            {
+                "trade_date": row["trade_date"],
+                "open": round(row["open"], 2),
+                "high": round(row["high"], 2),
+                "low": round(row["low"], 2),
+                "close": round(row["close"], 2),
+                "volume": int(row["volume"]),
+                "amount": None,
+                "pct_chg": None if pct is None else round(pct, 2),
+                "ma5": None if i < 4 else round(sum(closes[i - 4: i + 1]) / 5, 3),
+                "ma10": None if i < 9 else round(sum(closes[i - 9: i + 1]) / 10, 3),
+                "ma20": None if i < 19 else round(sum(closes[i - 19: i + 1]) / 20, 3),
+            }
+        )
+    return {
+        "schema": SCHEMA_VERSION,
+        "ok": True,
+        "symbol": symbol,
+        "name": INDEX_NAMES.get(symbol, symbol),
+        "kind": "index",
+        "period": "day",
+        "days": int(days),
+        "count": len(items),
+        "last_trade_date": items[-1]["trade_date"] if items else None,
+        "updated_at": _now_iso(),
+        "items": items,
+    }
+
+
+def _read_report_json(paths: list[Path]) -> tuple[Any | None, Path | None]:
+    for path in paths:
+        if path.is_file():
+            try:
+                return json.loads(path.read_text(encoding="utf-8")), path
+            except (OSError, json.JSONDecodeError):
+                return None, path
+    return None, None
+
+
 def _regime_payload(cfg: dict[str, Any]) -> Any:
     """读 ``data/reports/regime.json``；缺失/损坏返回中性错误（前端展示空态）。"""
     path = _reports_dir(cfg) / "regime.json"
@@ -502,18 +636,101 @@ def create_app(cfg: dict[str, Any] | None = None) -> FastAPI:
 
     @app.get("/api/kline")
     def kline(
-        symbol: str = Query(..., min_length=6, max_length=6, description="6 位股票代码"),
+        symbol: str = Query(..., min_length=6, max_length=9, description="6 位股票代码或指数代码"),
         days: int = Query(120, ge=1, le=500, description="返回最近 N 根日线"),
         period: str = Query("day", description="周期，目前仅 day"),
     ) -> Any:
-        symbol = str(symbol).strip()
-        if not re.fullmatch(r"\d{6}", symbol):
+        symbol = str(symbol).strip().lower() if not str(symbol).strip().isdigit() else str(symbol).strip()
+        if INDEX_CODE_RE.fullmatch(symbol):
+            return _index_kline_payload(symbol, int(days))
+        if not STOCK_CODE_RE.fullmatch(symbol):
             return JSONResponse(
                 status_code=400,
                 content={"schema": SCHEMA_VERSION, "ok": False, "error": "invalid_symbol",
-                         "message": "请输入 6 位股票代码"},
+                         "message": "请输入 6 位股票代码或指数代码"},
             )
         return _kline_payload(cfg, symbol, int(days), str(period).strip().lower())
+
+    @app.get("/api/search")
+    def search(
+        q: str = Query("", max_length=24, description="代码前缀/名称/拼音首字母"),
+        limit: int = Query(12, ge=1, le=30),
+    ) -> Any:
+        items = _search_items(cfg, str(q), int(limit))
+        return {"schema": SCHEMA_VERSION, "ok": True, "query": str(q), "items": items}
+
+    @app.get("/api/intraday")
+    def intraday(
+        code: str = Query("sh000001", max_length=9, description="指数代码"),
+    ) -> Any:
+        code = str(code).strip().lower()
+        if not INDEX_CODE_RE.fullmatch(code):
+            return JSONResponse(
+                status_code=400,
+                content={"schema": SCHEMA_VERSION, "ok": False, "error": "invalid_code",
+                         "message": "请输入指数代码，如 sh000001"},
+            )
+        reports = _reports_dir(cfg)
+        data, found = _read_report_json([
+            reports / "intraday" / f"{code}.json",
+            reports / f"intraday_{code}.json",
+            reports / "intraday.json",
+        ])
+        if isinstance(data, dict) and code in data and isinstance(data[code], (dict, list)):
+            data = data[code]
+        if data is None:
+            return JSONResponse(
+                status_code=404,
+                content={"schema": SCHEMA_VERSION, "ok": False, "error": "intraday_not_ready",
+                         "message": "分时数据暂未更新" if found is None else "分时数据读取失败"},
+            )
+        payload = data if isinstance(data, dict) else {"points": data}
+        payload.setdefault("schema", SCHEMA_VERSION)
+        payload.setdefault("code", code)
+        payload.setdefault("name", INDEX_NAMES.get(code, code))
+        payload.setdefault("ok", True)
+        return payload
+
+    @app.get("/api/market/history")
+    def market_history(
+        date: str | None = Query(None, max_length=10, description="交易日 YYYY-MM-DD"),
+    ) -> Any:
+        reports = _reports_dir(cfg)
+        candidates = []
+        if date:
+            candidates.append(reports / "market_history" / f"{date}.json")
+        candidates.extend([reports / "market_history" / "latest.json", reports / "market_history.json"])
+        data, _found = _read_report_json(candidates)
+        if data is None:
+            return JSONResponse(
+                status_code=404,
+                content={"schema": SCHEMA_VERSION, "ok": False, "error": "market_history_not_ready",
+                         "message": "当日情绪曲线暂未更新"},
+            )
+        payload = data if isinstance(data, dict) else {"points": data}
+        payload.setdefault("schema", SCHEMA_VERSION)
+        payload.setdefault("ok", True)
+        return payload
+
+    @app.get("/api/summary/latest")
+    def summary_latest() -> Any:
+        reports = _reports_dir(cfg)
+        data, _found = _read_report_json([
+            reports / "summary" / "latest.json",
+            reports / "summary.json",
+            reports / "daily_summary.json",
+            reports / "summaries.json",
+        ])
+        if data is None:
+            return JSONResponse(
+                status_code=404,
+                content={"schema": SCHEMA_VERSION, "ok": False, "error": "summary_not_ready",
+                         "message": "今日总结暂未生成"},
+            )
+        payload = data if isinstance(data, dict) else {"items": data}
+        payload.setdefault("schema", SCHEMA_VERSION)
+        payload.setdefault("ok", True)
+        return payload
 
     @app.get("/api/market")
     def market() -> Any:

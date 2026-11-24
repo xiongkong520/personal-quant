@@ -81,6 +81,34 @@ export const SCHEMA_STATEMENTS: string[] = [
   created_at TEXT NOT NULL
 )`,
   `CREATE INDEX IF NOT EXISTS idx_regime_asof ON regime_snapshots (asof DESC)`,
+  `CREATE TABLE IF NOT EXISTS boards (
+  board_name TEXT NOT NULL,
+  type       TEXT NOT NULL,
+  pct_1d     REAL,
+  pct_5d     REAL,
+  net_inflow REAL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (board_name, type)
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_boards_type_pct ON boards (type, pct_1d DESC)`,
+  `CREATE TABLE IF NOT EXISTS intraday_index (
+  code       TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  PRIMARY KEY (code, trade_date)
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_intraday_index_date ON intraday_index (trade_date DESC)`,
+  `CREATE TABLE IF NOT EXISTS market_summaries (
+  trade_date   TEXT NOT NULL,
+  session      TEXT NOT NULL,
+  asof         TEXT NOT NULL,
+  summary_text TEXT NOT NULL,
+  payload      TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  PRIMARY KEY (trade_date, session)
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_market_summaries_asof ON market_summaries (asof DESC)`,
 ];
 
 export const SCHEMA_SQL = `${SCHEMA_STATEMENTS.join(";\n\n")};\n`;

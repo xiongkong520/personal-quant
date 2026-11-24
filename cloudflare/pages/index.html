@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#0B0E13" />
 <meta name="robots" content="noindex, nofollow" />
 <title>个人量化工作台 · 云端实时</title>
-<link rel="stylesheet" href="styles.css?v=20261122f" />
+<link rel="stylesheet" href="styles.css?v=20261124b" />
 <script>window.QT_MODE = "cloud";</script>
 </head>
 <body>
@@ -49,8 +49,9 @@
       <span class="chip" data-bind="status.model">model —</span>
     </div>
     <span class="stock-search">
-      <input id="stockQuery" class="stock-input" type="text" inputmode="numeric" maxlength="6" placeholder="代码查询" aria-label="输入 6 位股票代码查询" />
-      <button class="btn btn-icon" id="stockQueryBtn" type="button" title="查询" aria-label="查询"><svg class="icon" aria-hidden="true"><use href="#i-chart"/></svg></button>
+      <input id="stockQuery" class="stock-input" type="text" inputmode="search" maxlength="16" placeholder="搜索代码 / 名称 / 拼音" aria-label="搜索股票：代码、名称或拼音首字母" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="searchPanel" />
+      <button class="btn btn-icon" id="stockQueryBtn" type="button" title="搜索" aria-label="搜索"><svg class="icon" aria-hidden="true"><use href="#i-chart"/></svg></button>
+      <div class="search-panel" id="searchPanel" hidden role="listbox" aria-label="搜索建议"></div>
     </span>
     <div class="topbar-actions">
       <span class="tag tag-dev" id="devTag" hidden>开发模式</span>
@@ -391,6 +392,6 @@
 <div class="sr-only" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
 <noscript><div class="noscript">本看板需要启用 JavaScript 才能加载数据。</div></noscript>
 
-<script src="app.js?v=20261122f" defer></script>
+<script src="app.js?v=20261124b" defer></script>
 </body>
 </html>

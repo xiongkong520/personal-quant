@@ -9,10 +9,17 @@
  *   GET  /api/stream    需 quant_pass：SSE 新信号推送，30s 心跳
  *   GET  /api/model     需 quant_pass：Worker 打包的 §5 模型权重（附加端点）
  *   POST /api/ingest    需 x-ingest-token / Bearer QUANT_INGEST_TOKEN：本地 Python 推送信号
- *   GET  /api/kline     需 quant_pass：个股日线（D1 klines，最多 250 根）?symbol=&limit=
+ *   GET  /api/search    需 quant_pass：全市场搜索 ?q=（代码前缀/名称/拼音首字母；D1 stock_names + 静态池）
+ *   GET  /api/kline     需 quant_pass：个股/指数日线（个股 D1 klines，指数东财实时，最多 250 根）?symbol=&limit=
  *   POST /api/kline/ingest  需 x-ingest-token：本地批量推送日线（幂等 upsert）
  *   GET  /api/regime    需 quant_pass：最新大盘状态/情绪/主线/仓位快照
  *   POST /api/regime/ingest 需 x-ingest-token：本地推送大盘状态快照
+ *   GET  /api/intraday   需 quant_pass：指数当日分时 ?code=sh000001（Worker Cron 每 5 分钟覆盖写）
+ *   GET  /api/market/history 需 quant_pass：某交易日市场快照序列 ?date=（盘中情绪曲线）
+ *   GET  /api/summary/latest 需 quant_pass：最近午评 + 收评
+ *   GET  /api/summaries 需 quant_pass：午评/收评列表 ?limit=
+ *   GET  /api/boards    需 quant_pass：板块行情榜 ?type=industry|concept&limit=
+ *   POST /api/daily-sync 需 x-ingest-token：手动触发收盘同步/午评/收评（?session 或 body.mode）
  *   其余路径                    静态资源（cloudflare/pages/ 由 frontend-dev 产出；空目录返回提示 JSON）
  *
  * 安全层（详见 src/security.ts）：
@@ -27,14 +34,20 @@ import modelJson from "../models/model.json" with { type: "json" };
 
 import { confidenceOf, directionOf, predictProba, validateModel, type QuantModel } from "./model.ts";
 import { refreshMarketLive } from "./market_live.ts";
+import { buildMarketSummary, handleScheduledCron, refreshIntradayIndex, runManualDailySync, syncDailyClose } from "./daily_sync.ts";
 import {
   d1Health,
   insertJsonSnapshot,
   insertMarketSnapshot,
   insertSignals,
+  queryBoards,
   queryEvents,
+  queryIntradayIndex,
   queryLatestJsonSnapshot,
   queryLatestMarket,
+  queryLatestSummaries,
+  queryMarketHistory,
+  queryMarketSummaries,
   querySignals,
   queryKlines,
   queryStockName,
@@ -44,6 +57,8 @@ import {
 } from "./db.ts";
 import type { KlineRow } from "./db.ts";
 import { extractIngestToken, MAX_INGEST_BYTES, normalizeSignal, nowShanghai, parseIngestBody, timingSafeEqual } from "./signals.ts";
+import { searchStocks } from "./search.ts";
+import { fetchIndexKline } from "./index_kline.ts";
 import {
   applySecurityHeaders,
   checkAcceptHeader,
@@ -661,6 +676,123 @@ async function handleMarket(request: Request, env: Env): Promise<Response> {
   });
 }
 
+// ------------------------------------- 盘中分时 / 市场历史 / 板块 / 摘要 ----
+
+/** GET /api/intraday?code=sh000001：指数当日分时（Worker Cron 每 5 分钟覆盖写 intraday_index）。 */
+async function handleIntraday(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const code = (url.searchParams.get("code") ?? "sh000001").trim();
+  if (!/^(sh|sz)\d{6}$/.test(code)) return errorResponse(400, "invalid_code", "code 需形如 sh000001 / sz399001");
+  const row = await queryIntradayIndex(env.DB, code);
+  const today = nowShanghai().slice(0, 10);
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    code,
+    trade_date: row ? row.trade_date : null,
+    updated_at: row ? row.updated_at : null,
+    stale: row ? row.trade_date !== today : true,
+    data: row ? row.payload : null,
+  });
+}
+
+/** GET /api/market/history?date=2026-11-24：某交易日市场快照序列（按 asof 升序，盘中情绪曲线）。 */
+async function handleMarketHistory(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const date = (url.searchParams.get("date") ?? nowShanghai().slice(0, 10)).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return errorResponse(400, "invalid_date", "date 需形如 2026-11-24");
+  const limitRaw = Number(url.searchParams.get("limit") ?? "120");
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 240) : 120;
+  const items = await queryMarketHistory(env.DB, date, limit);
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    date,
+    count: items.length,
+    items,
+    updated_at: items.length > 0 ? items[items.length - 1].asof : null,
+  });
+}
+
+/** GET /api/boards?type=industry|concept&limit=20：板块行情榜（Worker Cron 收盘同步写入）。 */
+async function handleBoards(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const type = (url.searchParams.get("type") ?? "").trim();
+  if (type && !["industry", "concept"].includes(type)) {
+    return errorResponse(400, "invalid_type", "type 只支持 industry / concept");
+  }
+  const limitRaw = Number(url.searchParams.get("limit") ?? "20");
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200) : 20;
+  const items = await queryBoards(env.DB, { type: type || undefined, limit });
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    type: type || "all",
+    count: items.length,
+    items,
+    updated_at: items.length > 0 ? items[0].updated_at : null,
+  });
+}
+
+/** GET /api/summary/latest：最近一条午评 + 最近一条收评。 */
+async function handleSummaryLatest(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const latest = await queryLatestSummaries(env.DB);
+  const updatedAt = (latest.close?.["asof"] as string | undefined) ?? (latest.midday?.["asof"] as string | undefined) ?? null;
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, midday: latest.midday, close: latest.close, updated_at: updatedAt });
+}
+
+/** GET /api/summaries?limit=20：午评/收评列表（时间倒序）。 */
+async function handleSummaries(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const limitRaw = Number(url.searchParams.get("limit") ?? "20");
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 100) : 20;
+  const items = await queryMarketSummaries(env.DB, limit);
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    count: items.length,
+    items,
+    updated_at: items.length > 0 ? (items[0]["asof"] as string) : null,
+  });
+}
+
+/** POST /api/daily-sync：手动触发收盘同步 / 午评 / 收评（x-ingest-token 保护）。 */
+async function handleDailySync(request: Request, env: Env, url: URL): Promise<Response> {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  let mode = (url.searchParams.get("session") ?? "").trim();
+  if (!mode) {
+    try {
+      const body = (await request.json()) as Record<string, unknown> | null;
+      const raw = body?.["session"] ?? body?.["mode"];
+      if (typeof raw === "string") mode = raw.trim();
+    } catch {
+      // 无 body 时默认 all
+    }
+  }
+  if (!mode) mode = "all";
+  if (!["all", "close", "midday", "intraday"].includes(mode)) {
+    return errorResponse(400, "invalid_mode", "session 只支持 all / close / midday / intraday");
+  }
+  const result = await runManualDailySync(env, mode as "all" | "close" | "midday" | "intraday");
+  return jsonResponse(result);
+}
+
 // ------------------------------------------------------------------ kline ----
 
 /** 单次推送最多行数（控制请求体大小；本地按 200 行/批推送）。 */
@@ -734,12 +866,30 @@ async function handleKline(request: Request, env: Env, url: URL): Promise<Respon
   const guard = await requireChallenge(request, env);
   if (guard) return guard;
   if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const symbol = (url.searchParams.get("symbol") ?? "").trim();
-  if (!/^\d{6}$/.test(symbol)) return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码");
+  const symbol = (url.searchParams.get("symbol") ?? "").trim().toLowerCase();
+  const isIndex = /^(sh|sz)\d{6}$/.test(symbol);
+  if (!isIndex && !/^\d{6}$/.test(symbol)) {
+    return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码或指数代码");
+  }
   const limitRaw = Number(url.searchParams.get("limit") ?? url.searchParams.get("days") ?? "120");
   const limit = Number.isFinite(limitRaw)
     ? Math.min(Math.max(Math.trunc(limitRaw), 1), KLINE_QUERY_MAX_ROWS)
     : 120;
+  if (isIndex) {
+    const live = await fetchIndexKline(symbol, limit);
+    if (!live) return errorResponse(404, "index_kline_unavailable", "该指数暂无日线数据，请稍后重试");
+    return jsonResponse({
+      schema: SCHEMA_VERSION,
+      ok: true,
+      symbol,
+      name: live.name,
+      kind: "index",
+      limit,
+      count: live.items.length,
+      items: live.items,
+      updated_at: nowShanghai(),
+    });
+  }
   const items = await queryKlines(env.DB, symbol, limit);
   return jsonResponse({
     schema: SCHEMA_VERSION,
@@ -964,7 +1114,7 @@ function handlePreflight(request: Request): Response {
 async function securityGate(request: Request, env: Env, path: string): Promise<Response | null> {
   // 可信 IP 白名单：免人机验证与限流（开发测试/自动化验收，见 env.TRUSTED_IPS）
   if (isTrustedIp(request, env)) return null;
-  const isMachineIngest = path === "/api/ingest" && request.method === "POST";
+  const isMachineIngest = (path === "/api/ingest" || path === "/api/daily-sync") && request.method === "POST";
   if (!isMachineIngest) {
     const ua = checkUserAgent(request);
     if (!ua.ok) return forbiddenClient(ua.reason ?? "forbidden_user_agent", ua.message ?? "User-Agent 被拒绝");
@@ -980,8 +1130,17 @@ async function securityGate(request: Request, env: Env, path: string): Promise<R
 
 export default {
   /** Cron 触发：盘中刷新市场快照（写 D1，Pages 前端读取） */
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(refreshMarketLive(env));
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const result = await handleScheduledCron(event.cron ?? "", env);
+          console.log(`[cron] ${event.cron || "(default)"} 完成：${JSON.stringify({ ok: result["ok"] ?? true })}`);
+        } catch (err) {
+          console.error(`[cron] ${event.cron || "(default)"} 失败：${err instanceof Error ? err.message : String(err)}`);
+        }
+      })(),
+    );
   },
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
@@ -1038,6 +1197,19 @@ export default {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
         return applySecurityHeaders(await handleStock(request, env, url));
+      }
+      if (path === "/api/search") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        const challenge = await requireChallenge(request, env);
+        if (challenge) return applySecurityHeaders(challenge);
+        const q = (url.searchParams.get("q") ?? "").trim();
+        if (!q) return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, query: q, items: [] }));
+        if (q.length > 24) return applySecurityHeaders(errorResponse(400, "invalid_query", "搜索关键词过长"));
+        const limitRaw = Number(url.searchParams.get("limit") ?? "12");
+        const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 30) : 12;
+        const items = await searchStocks(env, q, limit);
+        return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, query: q, items }));
       }
       if (path === "/api/stock-names/ingest") {
         const guard = methodGuard(request, ["POST"]);
@@ -1113,6 +1285,36 @@ export default {
         const guard = methodGuard(request, ["POST"]);
         if (guard) return applySecurityHeaders(guard);
         return applySecurityHeaders(await handleMarketIngest(request, env));
+      }
+      if (path === "/api/intraday") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleIntraday(request, env, url));
+      }
+      if (path === "/api/market/history") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleMarketHistory(request, env, url));
+      }
+      if (path === "/api/boards") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleBoards(request, env, url));
+      }
+      if (path === "/api/summary/latest") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleSummaryLatest(request, env));
+      }
+      if (path === "/api/summaries") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleSummaries(request, env, url));
+      }
+      if (path === "/api/daily-sync") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        return applySecurityHeaders(await handleDailySync(request, env, url));
       }
       if (path === "/api/ingest") {
         const guard = methodGuard(request, ["POST"]);
