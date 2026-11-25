@@ -562,7 +562,59 @@ interface IntradayData {
   points: IntradayPoint[];
 }
 
+/** 腾讯分时兜底（东财 trends2 限流时）：minute/query → 时间/价格/累计量额。 */
+async function fetchTencentIntraday(index: (typeof INDEXES)[number]): Promise<IntradayData> {
+  interface TencentMinuteNode {
+    data?: { data?: string[]; date?: string };
+    qt?: Record<string, string[]>;
+  }
+  const json = await fetchJson<{ data?: Record<string, TencentMinuteNode> }>(
+    `https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=${index.code}`,
+    { Referer: "https://gu.qq.com/" },
+  );
+  const node = json?.data?.[index.code];
+  const raw = node?.data?.data;
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error(`${index.code} 腾讯分时为空`);
+  const dateStr = String(node?.data?.date ?? "");
+  const tradeDate =
+    dateStr.length === 8
+      ? `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`
+      : shanghaiDate();
+  const qt = node?.qt?.[index.code];
+  const preClose = Array.isArray(qt) ? num(qt[4]) : null;
+  const points: IntradayPoint[] = [];
+  let cumVolume = 0;
+  let cumAmount = 0;
+  for (const line of raw) {
+    const parts = line.split(/\s+/);
+    const clock = parts[0] ?? "";
+    const price = num(parts[1]);
+    const volume = num(parts[2]) ?? 0;
+    const amount = num(parts[3]) ?? 0;
+    if (!clock || price === null) continue;
+    cumVolume += volume;
+    cumAmount += amount;
+    points.push({
+      time: `${clock.slice(0, 2)}:${clock.slice(2, 4)}`,
+      price,
+      avg_price: cumVolume > 0 ? round(cumAmount / cumVolume / 100, 3) : null,
+      volume,
+    });
+  }
+  if (points.length === 0) throw new Error(`${index.code} 腾讯分时解析为空`);
+  return { code: index.code, name: index.name, trade_date: tradeDate, pre_close: preClose, points };
+}
+
 async function fetchIndexIntraday(index: (typeof INDEXES)[number]): Promise<IntradayData> {
+  try {
+    return await fetchIndexIntradayEastmoney(index);
+  } catch (err) {
+    console.warn(`[daily_sync] 东财分时失败 ${index.code}: ${errorMessage(err)}，改用腾讯兜底`);
+    return await fetchTencentIntraday(index);
+  }
+}
+
+async function fetchIndexIntradayEastmoney(index: (typeof INDEXES)[number]): Promise<IntradayData> {
   const params = new URLSearchParams({
     secid: index.secid,
     fields1: "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
@@ -1062,11 +1114,16 @@ export async function syncDailyClose(env: Env): Promise<DailySyncResult> {
     steps,
     "klines",
     async () => {
-      let symbols = await queryStockSymbols(env.DB, STOCK_POOL_SIZE);
+      // 免费计划单次 invocation 子请求上限 50：K 线只同步少量做缓存，其余由 /api/kline 按需实时拉取
+      const syncLimit = Math.max(0, Math.min(Number(env.KLINE_SYNC_LIMIT ?? "6"), 20));
+      if (syncLimit === 0) {
+        return { symbols: 0, symbols_done: 0, rows: 0, failed: [] as string[], pool_source: "skipped", note: "按需实时拉取" };
+      }
+      let symbols = (await queryStockSymbols(env.DB, STOCK_POOL_SIZE)).slice(0, syncLimit);
       let poolSource = "db:stock_names";
-      if (symbols.length < STOCK_POOL_SIZE) {
+      if (symbols.length < syncLimit) {
         const fallback = FALLBACK_STOCK_POOL.filter((s) => !symbols.includes(s));
-        symbols = [...symbols, ...fallback].slice(0, STOCK_POOL_SIZE);
+        symbols = [...symbols, ...fallback].slice(0, syncLimit);
         poolSource = symbols.length > 0 ? "db+fallback" : "fallback";
       }
       const failed: string[] = [];
