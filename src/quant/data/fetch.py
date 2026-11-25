@@ -521,12 +521,21 @@ def fetch_daily(symbol: str, start: str, end: str, cfg: dict | None = None) -> p
         )
     try:
         frame = fetch_daily_sina(symbol, start, end, cfg)
-    except Exception as exc:  # noqa: BLE001 - 汇总主/备源错误
-        raise DataFetchError(
-            f"{symbol} 日线获取失败（东财：{em_error}；新浪：{exc}）"
-        ) from exc
-    frame.attrs["source"] = "sina"
-    return frame
+        frame.attrs["source"] = "sina"
+        return frame
+    except Exception as sina_exc:  # noqa: BLE001 - 汇总主/备/兜底源错误
+        try:
+            from quant.data.baostock_source import fetch_daily_baostock  # noqa: PLC0415
+
+            frame = fetch_daily_baostock(symbol, start, end)
+            if len(frame):
+                frame.attrs["source"] = "baostock"
+                return frame
+            raise DataFetchError("Baostock 未返回数据")
+        except Exception as bs_exc:  # noqa: BLE001
+            raise DataFetchError(
+                f"{symbol} 日线获取失败（东财：{em_error}；新浪：{sina_exc}；baostock：{bs_exc}）"
+            ) from bs_exc
 
 
 def sync_daily(
