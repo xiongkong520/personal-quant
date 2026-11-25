@@ -1,92 +1,95 @@
 {
   "schema": 1,
-  "asof": "2026-11-25T04:18:14+08:00",
-  "trade_date": "2026-11-24",
+  "asof": "2026-11-26T03:31:04+08:00",
+  "trade_date": "2026-11-25",
   "status": "ok",
   "errors": [],
   "indices": [
     {
       "code": "sh000001",
       "name": "上证指数",
-      "price": 3548.37,
-      "pct_chg": 0.27,
+      "price": 3476.47,
+      "pct_chg": -2.03,
       "direction": "down",
       "prob": {
-        "up": 0.0325,
-        "flat": 0.1618,
-        "down": 0.8058
+        "up": 0.0161,
+        "flat": 0.1182,
+        "down": 0.8656
       },
-      "confidence": 0.8058,
+      "confidence": 0.8656,
       "ma_state": "空头排列"
     },
     {
       "code": "sz399001",
       "name": "深证成指",
-      "price": 10423.6,
-      "pct_chg": -0.29,
+      "price": 10086.35,
+      "pct_chg": -3.23,
       "direction": "down",
       "prob": {
-        "up": 0.0325,
-        "flat": 0.1618,
-        "down": 0.8058
+        "up": 0.0161,
+        "flat": 0.1182,
+        "down": 0.8656
       },
-      "confidence": 0.8058,
+      "confidence": 0.8656,
       "ma_state": "空头排列"
     },
     {
       "code": "sz399006",
       "name": "创业板指",
-      "price": 2278.99,
-      "pct_chg": -0.05,
+      "price": 2183.58,
+      "pct_chg": -4.19,
       "direction": "down",
       "prob": {
-        "up": 0.1213,
-        "flat": 0.2714,
-        "down": 0.6074
+        "up": 0.0161,
+        "flat": 0.1182,
+        "down": 0.8656
       },
-      "confidence": 0.6074,
+      "confidence": 0.8656,
       "ma_state": "空头排列"
     },
     {
       "code": "sh000300",
       "name": "沪深300",
-      "price": 3963.82,
-      "pct_chg": 0.14,
+      "price": 3898.24,
+      "pct_chg": -1.66,
       "direction": "down",
       "prob": {
-        "up": 0.1213,
-        "flat": 0.2714,
-        "down": 0.6074
+        "up": 0.0161,
+        "flat": 0.1182,
+        "down": 0.8656
       },
-      "confidence": 0.6074,
+      "confidence": 0.8656,
       "ma_state": "空头排列"
     }
   ],
   "activity": {
-    "up": 1838,
-    "down": 3267,
-    "flat": 114,
-    "suspended": 5,
-    "limit_up": 64,
-    "limit_down": 4,
-    "active_pct": 35.18,
-    "asof": "2026-11-24 15:00:00"
+    "up": 567,
+    "down": 4588,
+    "flat": 61,
+    "suspended": 8,
+    "limit_up": 58,
+    "limit_down": 49,
+    "active_pct": 10.85,
+    "asof": "2026-11-25 15:00:00"
   },
   "sentiment": {
-    "score": 66.2,
-    "state": "warm",
-    "label": "偏热",
-    "breadth": 0.36,
-    "limit_ratio": 0.9412,
-    "active_pct": 35.18
+    "score": 34.1,
+    "state": "cold",
+    "label": "偏冷",
+    "breadth": 0.11,
+    "limit_ratio": 0.5421,
+    "active_pct": 10.85,
+    "breadth_score": 11.0,
+    "heat_score": 54.2,
+    "divergent": false
   },
   "market_direction": {
     "direction": "down",
     "prob": {
-      "up": 0.0769,
-      "flat": 0.2166,
-      "down": 0.7066
+      "up": 0.0161,
+      "flat": 0.1182,
+      "down": 0.8656
     },
-    "confidence": 0.7066
+    "confidence": 0.8656
   }
 }
