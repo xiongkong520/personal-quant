@@ -102,9 +102,12 @@ def fetch_index_daily(symbol: str) -> pd.DataFrame:
 
 
 def compute_sentiment(activity: dict[str, Any]) -> dict[str, Any]:
-    """0-100 情绪分 + 涨跌家数宽度 + 涨停跌停比 + 冰点/过热状态。
+    """0-100 情绪分：赚钱效应（宽度 55%）+ 投机热度（涨停结构 25%）+ 活跃度 20%。
 
-    权重：涨跌家数宽度 50%、涨停跌停比 30%、活跃度 20%（活跃度 15% 记满分）。
+    - 投机热度对涨停家数打折（<20 家按比例），避免小样本涨停比例失真；
+    - **分化判定**：宽度 < 45% 但涨停结构极强（涨停占比 > 70%）→ 显示「分化」，
+      避免"涨少跌多却偏热"的误导（参考 RESEARCH.md：宽度与投机热度是两层指标）；
+    - 冰点强判定：宽度极低且跌停显著多于涨停。
     """
     up, down = activity["up"], activity["down"]
     total = max(1, up + down)
@@ -112,7 +115,8 @@ def compute_sentiment(activity: dict[str, Any]) -> dict[str, Any]:
     lu, ld = activity["limit_up"], activity["limit_down"]
     limit_ratio = lu / max(1, lu + ld)
     activity_score = min(1.0, activity["active_pct"] / 15.0)
-    score = 100.0 * (0.5 * breadth + 0.3 * limit_ratio + 0.2 * activity_score)
+    heat_score = limit_ratio * min(1.0, lu / 20.0)
+    score = 100.0 * (0.55 * breadth + 0.25 * heat_score + 0.20 * activity_score)
     score = round(max(0.0, min(100.0, score)), 1)
 
     state = "neutral"
@@ -121,9 +125,13 @@ def compute_sentiment(activity: dict[str, Any]) -> dict[str, Any]:
         if score <= threshold:
             state, label = st, lb
             break
+    divergent = breadth < 0.45 and limit_ratio > 0.7
     # 冰点强判定：宽度极低且跌停显著多于涨停
     if state != "ice" and breadth < 0.15 and ld > lu:
         state, label = "ice", "冰点"
+        divergent = False
+    elif divergent:
+        state, label = "divergence", "分化"
     return {
         "score": score,
         "state": state,
@@ -131,6 +139,9 @@ def compute_sentiment(activity: dict[str, Any]) -> dict[str, Any]:
         "breadth": round(breadth, 4),
         "limit_ratio": round(limit_ratio, 4),
         "active_pct": activity["active_pct"],
+        "breadth_score": round(breadth * 100, 1),
+        "heat_score": round(heat_score * 100, 1),
+        "divergent": divergent,
     }
 
 

@@ -1589,3 +1589,9 @@ dialog::backdrop { background: rgba(5, 7, 11, 0.68); }
   .bt-extra-item:nth-child(2n + 1) { border-left: 0; }
   .search-panel { right: auto; left: 0; }
 }
+
+
+/* 情绪分项（赚钱效应 / 投机热度） */
+.mkt-split { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.pill.divergence { color: #f5a524; border-color: rgba(245, 165, 36, .5); background: rgba(245, 165, 36, .1); }
+.pill.cold { color: #6aa9ff; border-color: rgba(106, 169, 255, .45); background: rgba(106, 169, 255, .08); }

@@ -2240,13 +2240,14 @@
     sec.setAttribute("aria-labelledby", "mktTitle");
     sec.innerHTML =
       '<header class="card-head">' +
-        '<div><p class="eyebrow">市场整体</p><h2 id="mktTitle">00 指数 · 情绪 · 冰点</h2></div>' +
+        '<div><p class="eyebrow">市场整体</p><h2 id="mktTitle">00 指数 · 情绪 · 温度</h2></div>' +
         '<div class="card-meta"><span id="mktUpdated">更新 —</span><span class="dot" id="mktDot" aria-hidden="true"></span></div>' +
       '</header>' +
       '<div class="mkt-grid">' +
         '<div class="mkt-indices" id="mktIndices" aria-live="polite"><div class="mkt-empty">暂无市场数据</div></div>' +
         '<div class="mkt-sentiment">' +
           '<div class="mkt-row"><span class="muted">情绪温度</span><span><b class="num" id="mktScore">—</b><span class="pill" id="mktState">—</span></span></div>' +
+          '<div class="mkt-row mkt-split muted"><span>赚钱效应 <b class="num" id="mktBreadthScore">—</b></span><span>投机热度 <b class="num" id="mktHeatScore">—</b></span></div>' +
           '<div class="sent-track"><i id="mktFill"></i><b id="mktMark"></b></div>' +
           '<div class="mkt-row muted"><span>涨跌家数</span><span id="mktBreadthText">—</span></div>' +
           '<div class="breadth-bar" id="mktBreadthBar"><i class="up"></i><i class="flat"></i><i class="down"></i></div>' +
@@ -2287,8 +2288,16 @@
     var stateEl = $("#mktState");
     if (stateEl) {
       setText(stateEl, sent.label || "—");
-      stateEl.className = "pill" + (sent.state === "ice" ? " ice" : (sent.state === "hot" ? " hot" : ""));
+      var pillCls = "pill";
+      if (sent.state === "ice") pillCls += " ice";
+      else if (sent.state === "hot") pillCls += " hot";
+      else if (sent.state === "divergence") pillCls += " divergence";
+      else if (sent.state === "cold") pillCls += " cold";
+      stateEl.className = pillCls;
+      stateEl.title = sent.state === "divergence" ? "涨跌家数偏弱但涨停结构强，赚钱效应与投机热度背离" : "";
     }
+    setText($("#mktBreadthScore"), Number.isFinite(Number(sent.breadth_score)) ? fmtNum(Number(sent.breadth_score), 1) + "%" : "—");
+    setText($("#mktHeatScore"), Number.isFinite(Number(sent.heat_score)) ? fmtNum(Number(sent.heat_score), 1) + "%" : "—");
     var pct = Math.max(0, Math.min(100, Number(sent.score || 0)));
     var fill = $("#mktFill"); if (fill) fill.style.width = pct + "%";
     var mark = $("#mktMark"); if (mark) mark.style.left = pct + "%";

@@ -129,7 +129,8 @@ export function computeSentiment(a: Activity): Record<string, unknown> {
   const breadth = a.up / total;
   const limitRatio = a.limit_up / Math.max(1, a.limit_up + a.limit_down);
   const activityScore = Math.min(1, a.active_pct / 15);
-  let score = Math.round(100 * (0.5 * breadth + 0.3 * limitRatio + 0.2 * activityScore) * 10) / 10;
+  const heatScore = limitRatio * Math.min(1, a.limit_up / 20);
+  let score = Math.round(100 * (0.55 * breadth + 0.25 * heatScore + 0.2 * activityScore) * 10) / 10;
   score = Math.max(0, Math.min(100, score));
   let state = "neutral";
   let label = "中性";
@@ -147,9 +148,14 @@ export function computeSentiment(a: Activity): Record<string, unknown> {
       break;
     }
   }
+  let divergent = breadth < 0.45 && limitRatio > 0.7;
   if (state !== "ice" && breadth < 0.15 && a.limit_down > a.limit_up) {
     state = "ice";
     label = "冰点";
+    divergent = false;
+  } else if (divergent) {
+    state = "divergence";
+    label = "分化";
   }
   return {
     score,
@@ -158,6 +164,9 @@ export function computeSentiment(a: Activity): Record<string, unknown> {
     breadth: Math.round(breadth * 10000) / 10000,
     limit_ratio: Math.round(limitRatio * 10000) / 10000,
     active_pct: a.active_pct,
+    breadth_score: Math.round(breadth * 1000) / 10,
+    heat_score: Math.round(heatScore * 1000) / 10,
+    divergent,
   };
 }
 
