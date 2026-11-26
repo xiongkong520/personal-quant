@@ -54,19 +54,24 @@ jobs:
           python -m quant.cli events 2>&1 | tail -6
           python -m quant.data.ai_analysis 2>&1 | tail -8
 
+      - name: 配置 git 身份（提交训练产物用）
+        run: |
+          git config user.name "quant-bot"
+          git config user.email "quant-bot@users.noreply.github.com"
+
       - name: 训练 LightGBM（社区数据源：AKShare 主 + Baostock 兜底）
         continue-on-error: true
         run: |
           pip install -r training/requirements.txt
-          python training/fetch_data.py --symbols 600519,000001,300750,601318,600036,000858,002594,600030,000333,000651,601398,000725 --start 2024-01-01 --zt-days 1
+          python training/fetch_data.py --symbols 600519,000001,300750,601318,600036,000858,002594,600030,000333,000651,601398,000725 --start 2024-01-01 --zt-days 1 --retries 1 --akshare-fail-fast 1
           python training/train_lgbm.py
           python training/export_model.py
 
       - name: 提交训练模型与涨跌停池增量
         continue-on-error: true
         run: |
-          git add model/ training/data/zt_pool.parquet training/out/metrics.json
-          git commit -m "chore: LightGBM 训练 $(date -u +%F)" || echo "无变更"
+          git add -f model/ training/data/zt_pool.parquet training/out/metrics.json
+          git diff --cached --quiet || git commit -m "chore: LightGBM 训练 $(date -u +%F)"
           git push || echo "push 跳过"
 
       - name: 推送到 Cloudflare（缺 token 时跳过）

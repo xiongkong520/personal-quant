@@ -87,6 +87,38 @@ class DataSourceError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# AKShare 熔断：GitHub Actions / 共享 IP 上东财限流很常见，akshare 内部重试可能拖到几分钟；
+# 连续失败 N 次后本进程内直接走 Baostock 兜底（数据源优先级不变，只是避免无效等待）。
+# ---------------------------------------------------------------------------
+AKSHARE_FAILFAST_N = 2
+_akshare_state = {"consecutive_failures": 0, "disabled": False}
+
+
+def akshare_available() -> bool:
+    return not _akshare_state["disabled"]
+
+
+def _akshare_on_failure(exc: Exception) -> None:
+    _akshare_state["consecutive_failures"] += 1
+    if _akshare_state["consecutive_failures"] >= AKSHARE_FAILFAST_N and not _akshare_state["disabled"]:
+        _akshare_state["disabled"] = True
+        LOGGER.warning(
+            "AKShare 连续失败 %d 次（%s），本进程内后续直接使用 Baostock 兜底（--akshare-fail-fast 可调）",
+            _akshare_state["consecutive_failures"], str(exc)[:120],
+        )
+
+
+def _akshare_on_success() -> None:
+    _akshare_state["consecutive_failures"] = 0
+
+
+def reset_akshare_circuit() -> None:
+    """测试/脚本复用时可手动复位熔断状态。"""
+    _akshare_state["consecutive_failures"] = 0
+    _akshare_state["disabled"] = False
+
+
+# ---------------------------------------------------------------------------
 # 基础工具
 # ---------------------------------------------------------------------------
 def _ak():
@@ -116,6 +148,37 @@ def _bs_login() -> None:
         raise RuntimeError(f"Baostock 登录失败：{getattr(result, 'error_msg', '')}")
     _BAOSTOCK_READY = True
     LOGGER.info("Baostock 登录成功（免费兜底数据源）")
+
+
+def _bs_reset_session() -> None:
+    """重置 Baostock 会话（并发匿名账号互相踢下线/网络中断后使用）。"""
+    global _BAOSTOCK_READY
+    if _BAOSTOCK_READY:
+        try:
+            _bs().logout()
+        except Exception:  # pragma: no cover
+            pass
+    _BAOSTOCK_READY = False
+
+
+def _bs_call(query_fn: Callable[[], pd.DataFrame], label: str = "baostock"):
+    """执行 Baostock 查询；会话失效（用户未登录/连接中断）时重登录并重试一次。
+
+    说明：Baostock 匿名登录是进程级会话，同一 IP 多进程并发（例如本人跑多个分片抓取、
+    CI 与本机同时跑）会互相把会话踢下线，表现为 ``用户未登录``。这里做一次自愈重登录。
+    """
+    try:
+        _bs_login()
+        return query_fn()
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        session_errors = ("未登录", "login", "网络接收错误", "Broken pipe", "connection", "Connection")
+        if any(k in message for k in session_errors):
+            LOGGER.warning("%s 会话异常（%s），重新登录 Baostock 后重试", label, message[:120])
+            _bs_reset_session()
+            _bs_login()
+            return query_fn()
+        raise
 
 
 def bs_logout() -> None:
@@ -380,7 +443,10 @@ def fetch_baostock_stock_daily(symbol: str, start: str, end: str, retries: int) 
             rows.append(rs.get_row_data())
         return pd.DataFrame(rows, columns=rs.fields)
 
-    raw = retry_call(query, retries=retries, label=f"baostock/{symbol}")
+    raw = retry_call(
+        lambda: _bs_call(query, f"baostock/{symbol}"),
+        retries=retries, label=f"baostock/{symbol}",
+    )
     frame = ingest_baostock_daily(raw, symbol)
     frame = frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= end)]
     return frame.reset_index(drop=True)
@@ -395,17 +461,24 @@ def fetch_stock_daily(
     大批量股票池建议 ``--source baostock``：东财接口对同一 IP 限流很狠，反复失败会拖慢整批。
     """
     errors: list[str] = []
-    if source in ("auto", "akshare"):
+    # source=auto 时带 AKShare 连续失败熔断（CI/共享 IP 被东财限流时避免无效等待）
+    use_akshare = source in ("auto", "akshare") and (source == "akshare" or akshare_available())
+    if use_akshare:
         try:
             frame = fetch_akshare_stock_daily(symbol, start, end, retries)
             if len(frame) > 0:
+                _akshare_on_success()
                 LOGGER.info("fetch %s <- akshare rows=%d", symbol, len(frame))
                 time.sleep(sleep)
                 return frame
             errors.append("akshare: empty")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"akshare: {exc}")
+            if source == "auto":
+                _akshare_on_failure(exc)
             LOGGER.warning("AKShare %s 失败，切换 Baostock：%s", symbol, exc)
+    elif source == "auto":
+        errors.append("akshare: skipped(fail-fast)")
     if source in ("auto", "baostock"):
         try:
             frame = fetch_baostock_stock_daily(symbol, start, end, retries)
@@ -425,7 +498,8 @@ def fetch_index_daily(
 ) -> pd.DataFrame:
     """指数日线：AKShare 首选 → Baostock 兜底；都失败返回空表（训练降级为股票池等权基准）。"""
     errors: list[str] = []
-    if source in ("auto", "akshare"):
+    use_akshare = source in ("auto", "akshare") and (source == "akshare" or akshare_available())
+    if use_akshare:
         try:
             fn = _akshare_index_hist()
             raw = retry_call(
@@ -436,13 +510,18 @@ def fetch_index_daily(
             frame = ingest_index(raw, code, "akshare")
             frame = frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= end)]
             if len(frame) > 0:
+                _akshare_on_success()
                 LOGGER.info("index %s <- akshare rows=%d", code, len(frame))
                 time.sleep(sleep)
                 return frame.reset_index(drop=True)
             errors.append("akshare: empty")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"akshare: {exc}")
+            if source == "auto":
+                _akshare_on_failure(exc)
             LOGGER.warning("AKShare 指数 %s 失败，切换 Baostock：%s", code, exc)
+    elif source == "auto":
+        errors.append("akshare: skipped(fail-fast)")
 
     if source in ("auto", "baostock"):
         try:
@@ -460,7 +539,10 @@ def fetch_index_daily(
                     rows.append(rs.get_row_data())
                 return pd.DataFrame(rows, columns=rs.fields)
 
-            raw = retry_call(query, retries=retries, label=f"baostock/index{code}")
+            raw = retry_call(
+            lambda: _bs_call(query, f"baostock/index{code}"),
+            retries=retries, label=f"baostock/index{code}",
+        )
             frame = ingest_index(raw, code, "baostock")
             frame = frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= end)]
             if len(frame) > 0:
@@ -697,6 +779,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--end", default=end_default, help="结束日期 YYYY-MM-DD")
     parser.add_argument("--out-dir", default=str(DEFAULT_DATA_DIR), help="输出目录")
     parser.add_argument("--retries", type=int, default=2, help="单接口重试次数")
+    parser.add_argument(
+        "--akshare-fail-fast", type=int, default=AKSHARE_FAILFAST_N,
+        help="AKShare 连续失败 N 次后本进程直接走 Baostock（CI/共享 IP 限流时很有用；0=禁用熔断）",
+    )
     parser.add_argument("--sleep", type=float, default=0.45, help="接口间隔秒数（避免限流）")
     parser.add_argument("--zt-days", type=int, default=30, help="涨跌停池抓取最近 N 个交易日（0=全部；接口仅支持近 30 日）")
     parser.add_argument("--skip-zt", action="store_true", help="跳过涨跌停池")
@@ -720,6 +806,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    global AKSHARE_FAILFAST_N
+    if args.akshare_fail_fast and args.akshare_fail_fast > 0:
+        AKSHARE_FAILFAST_N = int(args.akshare_fail_fast)
+    if args.akshare_fail_fast == 0:
+        AKSHARE_FAILFAST_N = 10**9  # 视为禁用熔断
+    reset_akshare_circuit()
 
     if args.synthetic:
         summary = write_synthetic_data(out_dir, args)

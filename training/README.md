@@ -1,7 +1,12 @@
 # 零成本云端训练管道（training/）
 
-> 目标：用 **Kaggle / Colab / GitHub Actions 免费算力**完成「数据采集 → LightGBM 训练 → 轻量模型 JSON 导出」，
-> 训练产物提交回仓库，供 Cloudflare Worker 加载做 T+1 三分类推理。全流程**不需要 GPU**、不需要付费数据源。
+> 目标：用 **GitHub Actions / Kaggle / Colab 免费 CPU** 完成「数据采集 → LightGBM 训练 → 轻量模型 JSON 导出」，
+> 训练产物提交回仓库，供 Cloudflare Worker 加载做 T+1 三分类推理。
+> **全流程不需要 GPU、不需要 TPU、不需要付费数据源。**
+>
+> 当前正式方案：**GitHub Actions（CPU 2 vCPU）每日定时训练**，Kaggle Notebook CPU 作为备用实验环境。
+> **TPU 路径已弃用**：Kaggle TPU 需要身份验证（本次验证未通过），且 LightGBM 是树模型、CPU 足够，
+> 见 §1.1 与 `training/tpu/DEPRECATED.md`。
 >
 > ⚠️ 仅供学习研究，非投资建议。训练/回测不接券商、不做实盘。
 
@@ -18,23 +23,31 @@
 **不自行爬取腾讯/新浪原始 HTTP 接口**：社区不推荐（无公开 SLA、列口径易变、无复权保证），
 因此 `fetch_data.py` 只有 AKShare / Baostock 两条路径，没有腾讯/新浪降级开关。
 
-### 免费算力怎么选
+### 免费算力怎么选（CPU 就够）
 
 | 平台 | 配置 | 免费额度 | 适用 |
 |---|---|---|---|
-| **Kaggle Notebook（首选）** | 2× T4 GPU / 4 vCPU / 16GB | 约 30 小时/周（GPU） | 跑 40 只池 × 3 年全流程（约 10–20 分钟，CPU 就够） |
-| **Colab 免费** | 1× T4 / 2 vCPU | 动态（可能被回收） | 应急/临时实验；中断后重跑即可（脚本幂等增量） |
-| **GitHub Actions（兜底）** | 2 vCPU / 7GB | 公开仓库免费 | 每天定时只产出/更新模型（小池 + 短训练，<10 分钟），无需 GPU |
+| **GitHub Actions（当前正式方案）** | 2 vCPU / 7GB（标准 runner） | 公开仓库免费 | **每日定时训练**，产出/提交 `model/latest_model.json`；12 只池 + 近 3 年数据约 1–3 分钟（AKShare 限流时自动切 Baostock） |
+| **Kaggle Notebook（备用）** | 4 vCPU / 16GB（**选 CPU，不用 GPU/TPU**） | Notebook CPU 约 30 小时/周 | 手工跑 40 只池 × 3 年全量实验（10–20 分钟） |
+| **Colab 免费（应急）** | 2 vCPU（选 CPU） | 动态（可能被回收） | 临时实验；中断后重跑即可（脚本幂等增量） |
 
-> LightGBM 的 PyPI wheel 是 CPU 版，**不需要也不建议折腾 GPU**：本管道 40 只票 × 3 年数据量很小，
-> T4 机器上 CPU 训练 1 分钟级别。
+> LightGBM 的 PyPI wheel 是 **CPU 版**，本管道 40 只票 × 3 年数据量很小，CPU 训练 1 分钟级别——
+> **不需要 GPU，更不需要 TPU**（详见 §1.1）。
+
+### 1.1 为什么不用 TPU（已弃用）
+
+- **Kaggle TPU 需要身份验证**：本次创建 TPU Notebook 时用户身份验证未通过（已确认），免费 TPU 配额实际不可用；
+- **对树模型没有收益**：LightGBM 是 GBDT 树模型，CPU 就是最优路径；GPU/TPU 不加速树遍历训练，
+  LightGBM 的 GPU 支持还需要源码编译，社区对这点数据量也不推荐；
+- **维护成本**：`training/tpu/` 下的 Kaggle TPU/GRU 实验（全市场 TF 模型）已归档弃用，不进入线上推理链路
+  （Worker 只加载 `model/latest_model.json` 树模型）。详见 `training/tpu/DEPRECATED.md`。
 
 ---
 
 ## 2. 三步流程
 
 ```bash
-# 0) 安装依赖（Kaggle/Colab 里只需一次）
+# 0) 安装依赖（本地 / GitHub Actions / Kaggle CPU / Colab 里只需一次）
 pip install -r training/requirements.txt
 
 # 1) 数据采集：近 3 年前复权日线 + 最近 30 个交易日涨跌停池 → training/data/*.parquet
@@ -54,30 +67,44 @@ python training/export_model.py
 
 ### Kaggle Notebook 一键
 
-`training/kaggle_notebook.ipynb` 已封装上述三步：
-1. Kaggle 新建 Notebook → **开启 Internet**（Settings → Internet on）；
+`training/kaggle_notebook.ipynb` 已封装上述三步（**Kaggle 用 CPU 即可，无需 GPU/TPU**）：
+1. Kaggle 新建 **CPU** Notebook → **开启 Internet**（Settings → Internet on）；
 2. 上传 `kaggle_notebook.ipynb`（或直接打开），把仓库 clone 下来；
 3. 菜单 **Run All**，最后从右侧 Output 面板下载 `model/` 两个 JSON，提交回仓库。
 
-### GitHub Actions 兜底
+### GitHub Actions（当前正式方案，已接入 `daily-quant.yml`）
 
-在 `daily-quant.yml`（或单独 workflow）里加一步（由 Lead 负责接入）：
+`.github/workflows/daily-quant.yml` 中已包含训练步骤（每次推送/每日 17:30 定时）：
 
 ```yaml
-- name: 云端训练 + 导出模型
+- name: 训练 LightGBM（社区数据源：AKShare 主 + Baostock 兜底）
+  continue-on-error: true
   run: |
     pip install -r training/requirements.txt
-    python training/fetch_data.py --symbols 600519,000001,300750 --start 2024-01-01 --zt-days 1
+    python training/fetch_data.py --symbols 600519,000001,300750,... --start 2024-01-01 --zt-days 1 --retries 1 --akshare-fail-fast 1
     python training/train_lgbm.py
     python training/export_model.py
-- name: 提交模型
+
+- name: 提交训练模型与涨跌停池增量
+  continue-on-error: true
   run: |
+    git config user.name "quant-bot"            # ⚠️ 必须设置，否则 commit 静默失败
+    git config user.email "quant-bot@users.noreply.github.com"
     git add model/
-    git commit -m "chore(model): nightly lgbm $(date -u +%F)" || echo "无变更"
-    git push || true
+    [ -f training/data/zt_pool.parquet ] && git add -f training/data/zt_pool.parquet
+    [ -f training/out/metrics.json ] && git add -f training/out/metrics.json
+    git commit -m "chore(model): LightGBM $(date -u +%F)" || echo "无变更"
+    git push
 ```
 
-> Actions 里 `--zt-days 1` 只增量抓当日涨跌停池（接口历史窗口有限，历史靠每日累积）。
+> **CI 注意（实测 2026-11-26）**：
+> 1. GitHub 共享 runner 的 IP 大概率被东财限流，`fetch_data.py` 已内置 **AKShare 连续失败熔断**
+>    （`--akshare-fail-fast N`，默认 2；CI 建议 `1`），失败后本进程直接走 Baostock，避免 akshare
+>    内部重试把训练步骤拖到 30+ 分钟（曾在 Actions 上实测单步 34–36 分钟，接近 job 40 分钟超时）；
+> 2. 提交步骤必须先 `git config user.name/email`，否则 `git commit` 报 "Author identity unknown"，
+>    被 `|| echo 无变更` 吞掉，表现为"步骤成功但没有提交模型"；
+> 3. `training/data/zt_pool.parquet`（每日情绪池历史）与 `training/out/metrics.json` 是 workflow 指定
+>    入库的小文件，`training/.gitignore` 已用 `!` 放行；其它 data/out 文件仍不入库。
 
 ---
 
@@ -230,6 +257,8 @@ flat : 其余（|r| ≤ 0.2%，不构成可交易方向）
 | `--start/--end` | 近 3 年 ~ 今天 | 数据区间 |
 | `--zt-days` | 30 | 抓最近 N 个交易日涨跌停池（0=全部；接口只支持近 30 日） |
 | `--skip-zt/--skip-index` | - | 跳过情绪池/指数（更快） |
+| `--retries` | 2 | 单接口重试次数（CI 限流时用 1） |
+| `--akshare-fail-fast` | 2 | AKShare 连续失败 N 次后本进程直接走 Baostock（0=禁用熔断；CI 建议 1） |
 | `--synthetic` | - | 离线合成数据（无网络演示/CI） |
 
 ### `train_lgbm.py`
@@ -261,6 +290,9 @@ flat : 其余（|r| ≤ 0.2%，不构成可交易方向）
 | 涨跌停池大量为空 | 正常：免费接口只覆盖最近约 10~30 个交易日；老数据用代理情绪，历史靠每日增量累积 |
 | `libgomp.so.1` 缺失（Linux 精简环境） | `apt-get install -y libgomp1`（Kaggle/Colab 已内置） |
 | 特征/标签全空 | 数据区间不足 60 个交易日（ma_bias_60 需要预热）；扩大 `--start` |
+| Actions 训练步骤跑 30+ 分钟 | GitHub runner IP 被东财限流 + akshare 内部重试慢；加 `--retries 1 --akshare-fail-fast 1`（熔断后直接 Baostock） |
+| Actions 显示训练步骤成功但模型没更新 | 提交步骤缺 `git config user.name/email`（commit 静默失败）；按 §2 的提交步骤补上并加 `git add -f` 处理 ignored 文件 |
+| Baostock 报"用户未登录" | 匿名登录是进程级会话，同一 IP 多进程并发（如同时跑多个分片抓取）会互相踢下线；`fetch_data.py` 已自动重登录重试，大批量抓取建议**单进程串行**（`--source baostock --sleep 0.05` 分片逐个跑） |
 | 训练报「类别不足」 | 训练窗内缺少 flat/up/down；扩大区间或调大 `--train-days` |
 | 模型 JSON 超 2MB | 降低 `--num-iterations/--num-leaves`，或让导出脚本自动裁剪（会重算指标） |
 
@@ -278,34 +310,36 @@ flat : 其余（|r| ≤ 0.2%，不构成可交易方向）
 
 ---
 
-## 9. 本次小样本真实运行（验收记录 2026-11-26）
+## 9. 本地真实数据运行记录（验收 2026-11-26）
 
 ```bash
-# 1) 采集（小样本；当时东财接口临时限流，脚本自动切 Baostock，属预期兜底路径）
-python training/fetch_data.py --symbols 600519,000001,300750,601318,600036,000858,002594,600030 --start 2024-01-01 --skip-zt
-#    → daily.parquet 5616 行 / 8 只票 / 2024-01-02~2026-11-26；index.parquet 2106 行（000300/000001/399001）
-#    → 数据源：akshare 限流 → baostock 兜底成功（source 列标注；代码首选 AKShare，恢复后自动用回）
+# 1) 采集（本机东财限流 → 自动 Baostock 兜底；增量合并已有缓存）
+python training/fetch_data.py --symbols 600519,000001 --start 2024-01-01 --skip-zt
+#    → 成功；本轮训练池实际 62 只票 × 2024-01-02~2026-11-26（37,210 行，source=baostock）；
+#      index.parquet 2106 行（000300/000001/399001，source=baostock）
 
 # 2) 训练（250/20/20 滚动、LightGBM 120 轮 × 15 叶）
 python training/train_lgbm.py
-#    → training/out/{model.txt,metrics.json,train_meta.json,oof.parquet}
+#    → 22 折 Walk-Forward，OOF n=26,562；training/out/{model.txt,metrics.json,train_meta.json,oof.parquet}
 
 # 3) 导出
 python training/export_model.py
-#    → model/latest_model.json（332,573 bytes ≈ 325KB < 2MB）+ model/feature_config.json
+#    → model/latest_model.json（332,284 bytes ≈ 324.5KB < 2MB）+ model/feature_config.json（13,976 bytes）
 ```
 
-本次样本外（Walk-Forward，22 折，OOF n=3520）指标：
+本次样本外（Walk-Forward，22 折，OOF n=26,562）：
 
 | 指标 | 值 |
 |---|---|
-| accuracy | 41.70% |
-| logloss | 1.0805（均匀 1.0986） |
-| multiclass Brier | 0.6625（均匀 0.6667） |
-| 交易口径 win_rate | 42.17%（Wilson 95% CI 40.53%~43.83%，3455 笔） |
-| 分方向 win_rate | long 39.35%（1596 笔）/ short 44.59%（1859 笔，研究性做空） |
-| avg_net_return / payoff | -0.198% / 0.937 |
+| accuracy | 45.94% |
+| logloss | 0.9622（均匀 1.0986） |
+| multiclass Brier | 0.5994（均匀 0.6667） |
+| 交易口径 win_rate | 45.95%（Wilson 95% CI 45.35%~46.55%，26,555 笔） |
+| 分方向 win_rate | long 46.43%（13,344 笔）/ short 45.46%（13,211 笔，研究性做空） |
+| avg_net_return / payoff | -0.191% / 0.944 |
 
-> 说明：本次仅 8 只票、且涨跌停池历史数据不可用（免费接口只覆盖最近 30 日），情绪特征以股票池代理为主。
-> 结果不构成"模型有效"的结论，仅用于验证训练/导出链路与指标口径；正式训练请在 Kaggle 用 40 只池 × 3 年数据重跑。
-> 导出模型已通过 `validate_model_json` schema 校验，Python 参考推理与 LightGBM booster 预测 max|Δ|=1.1e-16。
+> 诚实口径：胜率低于 50%、单笔平均净收益为负，**不构成"模型有效"的结论**；且当前模型几乎不预测 flat
+> （预测分布 up/down 各半），flat 类 recall≈0。结果只用于验证训练/导出链路与指标口径。
+> 涨跌停池历史数据仍不可用（免费接口只覆盖最近 30 日），情绪特征以股票池代理为主。
+> 导出模型已通过 `validate_model_json` 校验，Python 参考推理与 LightGBM booster 预测 max|Δ|≈1.1e-16。
+> 正式训练请用 40 只池 × 3 年数据在 Kaggle CPU / Actions 重跑（见 §1、§2）。

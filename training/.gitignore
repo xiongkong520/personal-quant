@@ -1,5 +1,8 @@
-# 训练数据与中间产物不提交（模型产物在仓库根目录 model/ 下提交）
-data/
-out/
+# 训练数据与中间产物默认不提交；仅保留每日训练需要入库的两个小文件
+# （daily-quant.yml 的“提交训练模型与涨跌停池增量”步骤会 git add 这两个路径）
+data/*
+!data/zt_pool.parquet
+out/*
+!out/metrics.json
 __pycache__/
 *.pyc
