@@ -165,9 +165,11 @@
       var all = (state.marketAll || []).filter(function (s) {
         if (!s || !s.symbol) return false;
         var sym = String(s.symbol);
-        if (sym.indexOf("sz") !== 0 && sym.indexOf("sh") !== 0) return false;
+        // 全市场 = 沪/深/北交所（bj 前缀，如 bj920000）；market-all 已带 symbol 前缀
+        if (!/^(sh|sz|bj)\d{6}$/i.test(sym)) return false;
         if (!stateAll.filter) return true;
-        return String(s.code).indexOf(stateAll.filter) >= 0 || String(s.name).indexOf(stateAll.filter) >= 0;
+        var codeText = String(s.code || sym.replace(/^(sh|sz|bj)/i, ""));
+        return codeText.indexOf(stateAll.filter) >= 0 || String(s.name).indexOf(stateAll.filter) >= 0;
       });
       if (stateAll.sort === "pct_desc") all.sort(function (a, b) { return (b.pct_chg || 0) - (a.pct_chg || 0); });
       else if (stateAll.sort === "pct_asc") all.sort(function (a, b) { return (a.pct_chg || 0) - (b.pct_chg || 0); });
@@ -181,8 +183,9 @@
         var cls = (s.pct_chg || 0) > 0 ? "up" : ((s.pct_chg || 0) < 0 ? "down" : "flat");
         var amt = Number(s.amount || 0);
         var amtText = amt >= 1e8 ? (amt / 1e8).toFixed(2) + "亿" : amt >= 1e4 ? (amt / 1e4).toFixed(0) + "万" : "-";
-        return '<tr class="market-all-row" data-code="' + esc(s.code) + '">' +
-          '<td class="num">' + esc(s.code) + '</td>' +
+        var displayCode = String(s.code || String(s.symbol || "").replace(/^(sh|sz|bj)/i, ""));
+        return '<tr class="market-all-row" data-code="' + esc(s.symbol || s.code) + '">' +
+          '<td class="num">' + esc(displayCode) + '</td>' +
           '<td>' + esc(s.name) + '</td>' +
           '<td class="num">' + fmtNum(s.price) + '</td>' +
           '<td class="num ' + cls + '">' + ((s.pct_chg || 0) > 0 ? "+" : "") + fmtNum(s.pct_chg) + '%</td>' +
@@ -3832,6 +3835,17 @@
     return esc(value.slice(0, idx)) + "<mark>" + esc(value.slice(idx, idx + q.length)) + "</mark>" + esc(value.slice(idx + q.length));
   }
 
+  /** 从全市场快照里按完整 symbol（含 sh/sz/bj 前缀）取名称。 */
+  function marketNameFor(symbol) {
+    var target = String(symbol || "").trim().toLowerCase();
+    var list = state.marketAll || [];
+    for (var i = 0; i < list.length; i += 1) {
+      var item = list[i];
+      if (item && String(item.symbol || "").toLowerCase() === target) return String(item.name || "");
+    }
+    return "";
+  }
+
   function ensureMarketAll() {
     if (state.marketAll !== undefined && state.marketAll !== null) return Promise.resolve(state.marketAll);
     if (state.marketAllLoading) return state.marketAllLoading;
@@ -3881,7 +3895,7 @@
       }
       panel.innerHTML = search.items.map(function (item, i) {
         return '<button type="button" class="search-item' + (i === search.active ? " is-active" : "") + '" data-symbol="' + esc(item.symbol) + '" role="option" aria-selected="' + (i === search.active ? "true" : "false") + '">' +
-          '<span class="search-sym num">' + highlightMatch(item.symbol, input.value) + "</span>" +
+          '<span class="search-sym num">' + highlightMatch(item.code || String(item.symbol || "").replace(/^(sh|sz|bj)/i, ""), input.value) + "</span>" +
           '<span class="search-name">' + highlightMatch(item.name, input.value) + "</span>" +
           (item.initials ? '<span class="search-ini num">' + highlightMatch(item.initials, input.value) + "</span>" : "") +
           "</button>";
@@ -3894,14 +3908,17 @@
       if (String(input.value || "").trim()) open();
     }
     function selectSymbol(symbol, name) {
-      if (!/^\d{6}$/.test(symbol)) return;
-      input.value = symbol;
+      var sym = String(symbol || "").trim().toLowerCase();
+      if (!/^(?:\d{6}|(?:sh|sz|bj)\d{6})$/.test(sym)) return;
+      var displayCode = sym.replace(/^(sh|sz|bj)/, "");
+      var displayName = name || marketNameFor(sym) || "";
+      input.value = displayCode;
       close();
       input.blur();
       state.kline.auto = false;
-      loadKline(symbol, { force: false });
-      queryStockCard(symbol, name);
-      announce("已切换到 " + symbol + (name ? " " + name : ""));
+      loadKline(sym, { force: false });
+      queryStockCard(sym, displayName);
+      announce("已切换到 " + displayCode + (displayName ? " " + displayName : ""));
     }
     function queryStockCard(symbol, name) {
       if (!IS_CLOUD) return;
@@ -3926,15 +3943,16 @@
           var s = all[i];
           if (!s || !s.symbol) continue;
           var sym = String(s.symbol);
-          if (sym.indexOf("sz") !== 0 && sym.indexOf("sh") !== 0) continue;
-          var code = sym.slice(2);
+          // 全市场含北交所 bj 前缀；展示用 6 位 code，选中时传完整 symbol
+          if (!/^(sh|sz|bj)\d{6}$/i.test(sym)) continue;
+          var code = sym.replace(/^(sh|sz|bj)/i, "");
           var name = String(s.name || "");
           if (code.indexOf(q) >= 0 || name.indexOf(q) >= 0 || code === q) {
-            hits.push({ symbol: code, name: name, initials: "" });
+            hits.push({ symbol: sym, code: code, name: name, initials: "" });
           }
         }
         if (/^\d{6}$/.test(q) && !hits.length) {
-          hits.push({ symbol: q, name: "", initials: "" });
+          hits.push({ symbol: q, code: q, name: "", initials: "" });
         }
         applyItems(hits);
         return;
@@ -5000,13 +5018,13 @@
   function loadKline(symbol, options) {
     var opts = options || {};
     var sym = String(symbol || "").trim().toLowerCase();
-    if (!/^(?:\d{6}|(?:sh|sz)\d{6})$/.test(sym)) {
-      showKlineMessage({ title: "代码格式不正确", message: "请输入 6 位 A 股代码，或上证/深证指数代码（如 sh000001、sz399001）。", retry: false, icon: "i-warning" });
+    if (!/^(?:\d{6}|(?:sh|sz|bj)\d{6})$/.test(sym)) {
+      showKlineMessage({ title: "代码格式不正确", message: "请输入 6 位 A 股代码，或 sh/sz/bj + 6 位代码（如 sh000001、bj920000）。", retry: false, icon: "i-warning" });
       return Promise.resolve();
     }
     if (opts.auto !== true) state.kline.auto = false;
     state.kline.symbol = sym;
-    state.kline.name = signalNameFor(sym);
+    state.kline.name = signalNameFor(sym) || marketNameFor(sym);
     setKlineInputValue(sym);
     renderKlineHeader();
     var cached = state.kline.cache.get(sym);
