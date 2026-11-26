@@ -1,0 +1,11 @@
+[Unit]
+Description=每交易日 17:40（北京时间，A股收盘后）跑全市场增量 + 训练
+
+[Timer]
+# 服务器时区可能是 UTC，这里显式指定时区后缀
+OnCalendar=Mon..Fri *-*-* 17:40:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

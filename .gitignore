@@ -28,3 +28,5 @@ training/tpu/kaggle_out/
 training/tpu/kernel_main/
 training/tpu/kernel_probe/
 training/tpu/out/
+training/data_full/
+training/data_nn/
