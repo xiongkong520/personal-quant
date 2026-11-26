@@ -41,9 +41,15 @@ step "3/6 Python 虚拟环境"
 . .venv/bin/activate
 python -m pip install -U pip wheel
 
-step "4/6 依赖（数据源 + LightGBM + TensorFlow-CPU）"
+step "4/6 依赖（数据源 + LightGBM + TensorFlow）"
 # 先装 TF：它的 numpy 上限比 akshare/pandas 更紧，先装能让 pip 选出兼容版本
-pip install "tensorflow-cpu>=2.18,<2.22" lightgbm pyarrow baostock
+# GPU=1 时装 CUDA 版（AutoDL/云 GPU 机器用；需要 NVIDIA 驱动）
+if [ "${GPU:-0}" = "1" ]; then
+  pip install "tensorflow[and-cuda]>=2.18,<2.22"
+else
+  pip install "tensorflow-cpu>=2.18,<2.22"
+fi
+pip install lightgbm pyarrow baostock
 pip install -r training/requirements.txt
 python - <<'PY'
 import numpy, pandas, pyarrow, lightgbm, baostock

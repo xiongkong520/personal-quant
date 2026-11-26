@@ -61,6 +61,11 @@ try:
 except Exception:
     pass
 report["disk_free_gb"] = round(shutil.disk_usage("/").free / 1e9, 1)
+try:
+    gpu_smi = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)
+    report["gpu_smi"] = gpu_smi.stdout.strip() or gpu_smi.stderr.strip()[:200]
+except FileNotFoundError:
+    report["gpu_smi"] = "nvidia-smi 不存在（说明这台机器没有 GPU）"
 report["kaggle_working_files"] = sorted(os.listdir("/kaggle/working")) if os.path.isdir("/kaggle/working") else []
 
 def pkg_version(mod):
@@ -75,12 +80,22 @@ report["packages"] = {m: pkg_version(m) for m in
 print(json.dumps(report, ensure_ascii=False, indent=2))
 """),
     _cell("code", """
+# 网络探测：Internet 是否开启（未做手机验证的账号会被关掉）
+import subprocess
+for url in ("https://github.com", "https://www.kaggle.com", "https://pypi.org"):
+    r = subprocess.run(["curl", "-sS", "-m", "8", "-o", "/dev/null", "-w", "%{http_code}", url],
+                       capture_output=True, text=True)
+    print(f"{url:28s} -> {r.stdout.strip() or 'FAILED'} {r.stderr.strip()[:120]}")
+"""),
+    _cell("code", """
 # TPU 探测：谁真的能拿到 8 核？
 tpu = {"tensorflow": None, "jax": None}
 
 try:
     import tensorflow as tf
-    info = {"version": tf.__version__}
+    info = {"version": tf.__version__,
+            "gpus": [d.name for d in tf.config.list_physical_devices("GPU")],
+            "cuda_built": bool(tf.test.is_built_with_cuda())}
     try:
         resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu="local")
         tf.config.experimental_connect_to_cluster(resolver)
