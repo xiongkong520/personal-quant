@@ -52,6 +52,7 @@ jobs:
           python -m quant.cli signal 2>&1 | tail -6
           python -m quant.cli market 2>&1 | tail -6
           python -m quant.cli events 2>&1 | tail -6
+          python -m quant.data.ai_analysis 2>&1 | tail -8
 
       - name: 训练 LightGBM（社区数据源：AKShare 主 + Baostock 兜底）
         continue-on-error: true
@@ -86,6 +87,7 @@ jobs:
           cp data/reports/backtest.md reports/backtest.md 2>/dev/null || true
           cp data/reports/index_backtest.md reports/index_backtest.md 2>/dev/null || true
           cp data/reports/market.json reports/market.json 2>/dev/null || true
+          cp data/reports/ai_reports.json reports/ai_reports.json 2>/dev/null || true
           git config user.name "quant-bot"
           git config user.email "quant-bot@users.noreply.github.com"
           git add models reports

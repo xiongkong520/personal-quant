@@ -168,7 +168,10 @@
     intraday: "/api/intraday",
     marketHistory: "/api/market/history",
     summary: "/api/summary/latest",
-    search: "/api/search"
+    search: "/api/search",
+    me: "/api/me",
+    aiInsight: "/api/ai/insight",
+    marketOverview: "/api/market-overview"
   };
 
   /* 安全必需白名单：Turnstile 官方组件。除此之外页面不加载任何外部资源。 */
@@ -570,12 +573,23 @@
   function detectGate() {
     if (state.gate.configPromise) return state.gate.configPromise;
     var req = function () {
-      return getJSON(EP.config, { timeoutMs: 4000 }).then(function (r) {
-        if (r.error || r.rateLimited || r.challenge) {
-          setDevMode(true, IS_CLOUD ? "验证配置不可用（GET /api/config）" : "本地开发模式：未启用访问验证");
+      // 受信 IP（白名单）免人机验证：先查 /api/me，trusted 则直接放行
+      return getJSON(EP.me, { timeoutMs: 4000 }).catch(function () { return null; }).then(function (me) {
+        var payload = me && me.data ? me.data : null;
+        if (payload && payload.trusted === true) {
+          state.gate.required = false;
+          state.gate.passed = true;
+          state.gate.sitekey = "";
+          setDevMode(false);
           return;
         }
-        applyGateConfig(r.data);
+        return getJSON(EP.config, { timeoutMs: 4000 }).then(function (r) {
+          if (r.error || r.rateLimited || r.challenge) {
+            setDevMode(true, IS_CLOUD ? "验证配置不可用（GET /api/config）" : "本地开发模式：未启用访问验证");
+            return;
+          }
+          applyGateConfig(r.data);
+        });
       });
     };
     state.gate.configPromise = req().then(function (value) {
@@ -2380,7 +2394,7 @@
     sec.setAttribute("aria-labelledby", "mktTitle");
     sec.innerHTML =
       '<header class="card-head">' +
-        '<div><p class="eyebrow">市场整体</p><h2 id="mktTitle">00 指数 · 情绪 · 温度</h2></div>' +
+        '<div><p class="eyebrow">市场概览</p><h2 id="mktTitle">指数 · 情绪 · 涨跌</h2></div>' +
         '<div class="card-meta"><span id="mktUpdated">更新 —</span><span class="dot" id="mktDot" aria-hidden="true"></span></div>' +
       '</header>' +
       '<div class="mkt-grid">' +
@@ -2416,11 +2430,14 @@
       var chg = Number(it.pct_chg || 0);
       var cls = chg > 0 ? "up" : (chg < 0 ? "down" : "flat");
       var dir = it.direction === "up" ? "偏多" : (it.direction === "down" ? "偏空" : "震荡");
-      html += '<div class="idx-card">' +
+      var amount = Number(it.amount || 0);
+      var amtText = amount > 0 ? (amount >= 1e12 ? (amount / 1e12).toFixed(2) + "万亿" : (amount / 1e8).toFixed(0) + "亿") : "";
+      html += '<div class="idx-row">' +
         '<span class="idx-name">' + esc(it.name) + '</span>' +
-        '<b class="idx-px num">' + fmtNum(it.price) + '</b>' +
+        (amtText ? '<span class="idx-amt num muted">' + amtText + '</span>' : "") +
+        '<b class="idx-px num ' + cls + '">' + fmtNum(it.price) + '</b>' +
         '<span class="idx-chg num ' + cls + '">' + (chg > 0 ? "+" : "") + fmtNum(chg) + '%</span>' +
-        '<span class="idx-dir ' + cls + '">' + dir + ' ' + fmtNum((it.confidence || 0) * 100, 0) + '%</span>' +
+        '<span class="idx-dir ' + cls + '">' + dir + '</span>' +
       '</div>';
     });
     box.innerHTML = html;
@@ -3216,6 +3233,28 @@
   }
 
   function loadSummary() {
+    // S3 后午评/收评表已删除：收评来自 AI 分析（/api/ai/insight）
+    return getJSON(EP.aiInsight).then(function (r) {
+      if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
+      if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
+      if (r.error) {
+        state.summary = null;
+        renderSummary();
+        return { kind: r.error.status === 404 ? "empty" : "error" };
+      }
+      var insight = (r.data && r.data.insight) || {};
+      var text = String(insight.summary || "").trim();
+      state.summary = {
+        midday: null,
+        close: text ? { summary_text: text, asof: insight.generated_at } : null,
+        date: "", updatedAt: insight.generated_at || ""
+      };
+      renderSummary();
+      return { kind: text ? "ok" : "empty" };
+    });
+  }
+
+  function loadSummaryLegacy() {
     return getJSON(EP.summary).then(function (r) {
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
       if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
@@ -3724,11 +3763,24 @@
     sec.dataset.page = "market";
   }
   function loadEvents() {
-    return getJSON(EP.events + "?limit=40").then(function (r) {
+    // S3 后事件表已删除：事件数据来自 AI 语义分析（/api/ai/insight）
+    return getJSON(EP.aiInsight).then(function (r) {
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
       if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
       if (r.error) { return { kind: r.error.status === 404 ? "empty" : "error" }; }
-      var items = (r.data && (r.data.items || (r.data.snapshot && r.data.snapshot.items))) || [];
+      var insight = (r.data && r.data.insight) || {};
+      var ea = insight.event_analysis || {};
+      var at = insight.generated_at || "";
+      var items = [];
+      (ea.bullish || []).forEach(function (x) {
+        items.push({ title: x.title, label: "利好", sentiment: "bullish", reason: x.reason, sectors: x.sectors || [], published_at: at, source: "AI" });
+      });
+      (ea.bearish || []).forEach(function (x) {
+        items.push({ title: x.title, label: "利空", sentiment: "bearish", reason: x.reason, sectors: x.sectors || [], published_at: at, source: "AI" });
+      });
+      if (!items.length && ea.summary) {
+        items.push({ title: String(ea.summary), label: "中性", sentiment: "neutral", published_at: at, source: "AI" });
+      }
       state.events = items;
       renderEvents();
       return { kind: items.length ? "ok" : "empty" };
@@ -4835,7 +4887,8 @@
   }
 
   function loadRegime() {
-    return getJSON(EP.regime).then(function (r) {
+    // S3 后 regime 表已删除：大盘状态由 /api/market-overview 的宽度/情绪/板块合成
+    return getJSON(EP.marketOverview).then(function (r) {
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
       if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
       if (r.error) {
@@ -4844,12 +4897,30 @@
         renderRegime();
         return { kind: r.error.status === 404 ? "empty" : "error" };
       }
-      var data = r.data || {};
-      var snapshot = data.snapshot && typeof data.snapshot === "object" ? data.snapshot : data;
-      state.regime = snapshot && snapshot.market_state ? snapshot : null;
-      state.regimeUpdatedAt = data.updated_at || (snapshot && snapshot.asof) || null;
+      var d = r.data || {};
+      var b = d.breadth || {};
+      var sent = b.sentiment || {};
+      var score = Number(sent.score || 0);
+      var label = sent.label || "中性";
+      var stateName = score < 25 ? "lean_bear" : (score >= 65 && sent.state !== "divergence" ? "lean_bull" : "range");
+      var sectorRows = (((d.sectors || {}).industry || {}).gainers || []).slice(0, 5).map(function (g) {
+        return { name: g.name, pct_1d: g.pct_chg, pct_5d: null, net_inflow: g.net_inflow, leader: g.leader };
+      });
+      var hs300 = (d.indices || []).filter(function (i) { return i.code === "000300"; })[0] || null;
+      state.regime = {
+        market_state: { state: stateName, label: label, score: score, reasons: [
+          "涨跌家数 " + fmtInt(b.up) + " / " + fmtInt(b.down),
+          "涨停 " + fmtInt(b.limit_up) + " / 跌停 " + fmtInt(b.limit_down),
+          "两市成交额 " + (Number(b.total_amount || 0) / 1e12).toFixed(2) + " 万亿"
+        ] },
+        emotion: { score: score, label: label, breadth_score: sent.breadth_score, heat_score: sent.heat_score, up: b.up, down: b.down, limit_up: b.limit_up, limit_down: b.limit_down },
+        trend: hs300 ? { index: "沪深300", close: hs300.price, pct_chg: hs300.pct_chg } : {},
+        leaders: sectorRows,
+        position: { range: "仅研究", label: "非投资建议", rationale: "基于市场宽度与情绪合成的参考状态", disclaimer: "研究用途，不构成投资建议" }
+      };
+      state.regimeUpdatedAt = d.asof || null;
       renderRegime();
-      return { kind: state.regime ? "ok" : "empty" };
+      return { kind: "ok" };
     });
   }
 

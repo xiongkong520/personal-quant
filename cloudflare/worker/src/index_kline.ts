@@ -70,7 +70,7 @@ async function fetchKlineRaw(symbol: string, fqt: number): Promise<IndexKlineIte
     `?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=${fqt}&beg=20240101&end=20500101`;
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6000);
+    const timer = setTimeout(() => controller.abort(), 3000);
     const resp = await fetch(url, {
       signal: controller.signal,
       headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)" },
@@ -121,6 +121,138 @@ async function fetchKlineRaw(symbol: string, fqt: number): Promise<IndexKlineIte
   }
 }
 
+/** 新浪日 K 兜底（展示用途；东财/腾讯对 Worker 出口不可达时使用）。 */
+async function fetchSinaKline(symbol: string, limit: number, fqt: number): Promise<IndexKlineItem[] | null> {
+  let code: string;
+  if (/^(sh|sz|bj)\d{6}$/i.test(symbol)) {
+    code = symbol.toLowerCase();
+  } else if (/^\d{6}$/.test(symbol)) {
+    code = `${symbol.startsWith("6") || symbol.startsWith("9") ? "sh" : "sz"}${symbol}`;
+  } else {
+    return null;
+  }
+  const cap = Math.min(Math.max(Math.trunc(limit), 1), 250);
+  const url =
+    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData" +
+    `?symbol=${code}&scale=240&ma=no&datalen=${cap}`;
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", Referer: "https://finance.sina.com.cn/" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return null;
+    const payload = (await resp.json()) as Array<Record<string, unknown>>;
+    if (!Array.isArray(payload) || payload.length === 0) return null;
+    const items: IndexKlineItem[] = [];
+    const closes: number[] = [];
+    for (const row of payload) {
+      const date = String(row["day"] ?? row["date"] ?? "");
+      const open = Number(row["open"]);
+      const close = Number(row["close"] ?? row["price"]);
+      const high = Number(row["high"]);
+      const low = Number(row["low"]);
+      const volume = Number(row["volume"]);
+      if (!date || !Number.isFinite(close)) continue;
+      closes.push(close);
+      const idx = closes.length - 1;
+      const prev = idx > 0 ? closes[idx - 1] : null;
+      items.push({
+        symbol,
+        trade_date: date,
+        open: Number.isFinite(open) ? round(open) : null,
+        high: Number.isFinite(high) ? round(high) : null,
+        low: Number.isFinite(low) ? round(low) : null,
+        close: round(close),
+        volume: Number.isFinite(volume) ? volume : null,
+        amount: null,
+        pct_chg: prev && prev > 0 ? round((close / prev - 1) * 100) : null,
+        ma5: null,
+        ma10: null,
+        ma20: null,
+      });
+    }
+    const sliced = items.slice(-cap);
+    for (let i = 0; i < sliced.length; i += 1) {
+      const window = closes.slice(0, closes.length - sliced.length + i + 1);
+      sliced[i].ma5 = ma(window, 5);
+      sliced[i].ma10 = ma(window, 10);
+      sliced[i].ma20 = ma(window, 20);
+    }
+    return sliced.length > 0 ? sliced : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 腾讯日 K 兜底（展示用途；东财 push2his 对 Worker 出口限流时使用）。 */
+async function fetchTencentKline(symbol: string, limit: number, fqt: number): Promise<IndexKlineItem[] | null> {
+  let code: string;
+  if (/^(sh|sz|bj)\d{6}$/i.test(symbol)) {
+    code = symbol.toLowerCase();
+  } else if (/^\d{6}$/.test(symbol)) {
+    code = `${symbol.startsWith("6") || symbol.startsWith("9") ? "sh" : "sz"}${symbol}`;
+  } else {
+    return null;
+  }
+  const adjust = fqt === 2 ? "hfq" : fqt === 0 ? "" : "qfq";
+  const cap = Math.min(Math.max(Math.trunc(limit), 1), 250);
+  const url =
+    "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get" +
+    `?param=${code},day,,,${cap},${adjust}`;
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return null;
+    const payload = (await resp.json()) as {
+      data?: Record<string, { qfqday?: string[][]; hfqday?: string[][]; day?: string[][] }>;
+    };
+    const node = payload?.data?.[code];
+    const rows = node?.qfqday ?? node?.hfqday ?? node?.day;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const items: IndexKlineItem[] = [];
+    const closes: number[] = [];
+    for (const row of rows) {
+      const date = String(row[0] ?? "");
+      const open = Number(row[1]);
+      const close = Number(row[2]);
+      const high = Number(row[3]);
+      const low = Number(row[4]);
+      const volume = Number(row[5]);
+      const amount = Number(row[6]);
+      if (!date || !Number.isFinite(close)) continue;
+      closes.push(close);
+      const idx = closes.length - 1;
+      const prev = idx > 0 ? closes[idx - 1] : null;
+      items.push({
+        symbol,
+        trade_date: date,
+        open: Number.isFinite(open) ? round(open) : null,
+        high: Number.isFinite(high) ? round(high) : null,
+        low: Number.isFinite(low) ? round(low) : null,
+        close: round(close),
+        volume: Number.isFinite(volume) ? volume : null,
+        amount: Number.isFinite(amount) ? amount : null,
+        pct_chg: prev && prev > 0 ? round((close / prev - 1) * 100) : null,
+        ma5: null,
+        ma10: null,
+        ma20: null,
+      });
+    }
+    const sliced = items.slice(-cap);
+    for (let i = 0; i < sliced.length; i += 1) {
+      const window = closes.slice(0, closes.length - sliced.length + i + 1);
+      sliced[i].ma5 = ma(window, 5);
+      sliced[i].ma10 = ma(window, 10);
+      sliced[i].ma20 = ma(window, 20);
+    }
+    return sliced.length > 0 ? sliced : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 指数 K 线（兼容保留：sh000001/sz399001/sz399006/sh000300/sh000688/sh000905/sh000852）。 */
 export async function fetchIndexKline(symbol: string, limit = 120): Promise<IndexKlineItem[] | null> {
   if (!INDEX_CODE_SET.has(symbol)) return null;
@@ -132,7 +264,13 @@ export async function fetchRealtimeKline(symbol: string, limit = 120, fqt = 1): 
   const cap = Math.min(Math.max(Math.trunc(limit), 1), 250);
   const cached = cache.get(`${symbol}:${fqt}:${cap}`);
   if (cached && Date.now() - cached.at < CACHE_MS) return cached.items;
-  const items = await fetchKlineRaw(symbol, fqt);
+  let items = await fetchKlineRaw(symbol, fqt);
+  if (!items || items.length === 0) {
+    items = await fetchSinaKline(symbol, cap, fqt);
+  }
+  if (!items || items.length === 0) {
+    items = await fetchTencentKline(symbol, cap, fqt);
+  }
   if (!items || items.length === 0) return null;
   const sliced = items.slice(-cap);
   cache.set(`${symbol}:${fqt}:${cap}`, { at: Date.now(), items: sliced });
