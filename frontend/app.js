@@ -144,7 +144,7 @@
     var marketPage = document.querySelector('[data-page="market"]');
     if (!marketPage) return;
     var card = document.createElement("section");
-    card.className = "card";
+    card.className = "card span-12";
     card.id = "marketAllCard";
     card.dataset.page = "market";
     card.hidden = true;
@@ -154,7 +154,7 @@
       '<input id="marketAllFilter" class="market-all-filter" type="search" placeholder="代码/名称筛选" autocomplete="off" />' +
       '<select id="marketAllSort" class="market-all-sort"><option value="pct_desc">涨幅降序</option><option value="pct_asc">涨幅升序</option><option value="amount_desc">成交额降序</option><option value="exchange">换手率降序</option></select>' +
       '</div>' +
-      '<div class="table-wrap market-all-wrap"><table class="table" id="marketAllTable"><thead><tr><th>代码</th><th>名称</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">成交额</th><th class="num">换手</th></tr></thead><tbody></tbody></table></div>' +
+      '<div class="tbl-wrap market-all-wrap"><table class="tbl tbl-sm" id="marketAllTable"><thead><tr><th>代码</th><th>名称</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">成交额</th><th class="num">换手</th></tr></thead><tbody></tbody></table></div>' +
       '<div class="market-all-pager"><button type="button" class="ghost" id="marketAllPrev">上一页</button><span id="marketAllPage">1 / 1</span><button type="button" class="ghost" id="marketAllNext">下一页</button><span class="muted" id="marketAllCount"></span></div>';
     var anchorEl = document.getElementById("klineCard") || document.getElementById("stockResult");
     if (anchorEl && anchorEl.parentNode) anchorEl.parentNode.insertBefore(card, anchorEl.nextSibling);
@@ -196,7 +196,15 @@
       if (countEl) countEl.textContent = "共 " + all.length + " 只";
     }
     function load() {
-      ensureMarketAll().then(function () { render(); });
+      ensureMarketAll().then(function () {
+        render();
+        var noteEl = card.querySelector("#marketAllNote");
+        if (noteEl) {
+          var total = (state.marketAll || []).length;
+          var stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+          noteEl.textContent = "全市场 " + total + " 只 · 更新 " + stamp;
+        }
+      });
     }
     card.querySelector("#marketAllPrev").addEventListener("click", function () { if (stateAll.page > 1) { stateAll.page -= 1; render(); } });
     card.querySelector("#marketAllNext").addEventListener("click", function () { stateAll.page += 1; render(); });
@@ -250,7 +258,9 @@
     search: "/api/search",
     me: "/api/me",
     aiInsight: "/api/ai/insight",
-    marketOverview: "/api/market-overview"
+    marketOverview: "/api/market-overview",
+    marketAll: "/api/market-all",
+    boardMembers: "/api/board-members"
   };
 
   /* 安全必需白名单：Turnstile 官方组件。除此之外页面不加载任何外部资源。 */
@@ -544,6 +554,8 @@
     eqGeo: null,
     regime: null,
     regimeUpdatedAt: null,
+    boardIndex: null,
+    boardIndexPromise: null,
     kline: {
       symbol: "",
       name: "",
@@ -3524,6 +3536,7 @@
       '<div class="pano-block"><div class="col-head"><span>资金净流入 Top10</span><span class="col-meta">行业 + 概念</span></div>' +
         '<div class="pano-list" id="panoFlow"><div class="mkt-empty">暂无资金流数据</div></div></div>';
     card.appendChild(grid);
+    bindBoardLeaders();
   }
 
   function panoRowHtml(item, index) {
@@ -3531,15 +3544,21 @@
     var d1 = num(item.pct_1d);
     var d5 = num(item.pct_5d);
     var flow = num(item.net_inflow);
-    return '<div class="pano-row">' +
+    var name = item.name || "—";
+    var pickable = name !== "—";
+    var attrs = pickable
+      ? ' class="pano-row pano-row-pick" data-board="' + esc(name) + '" role="button" tabindex="0" title="点击查看成分股"'
+      : ' class="pano-row"';
+    return "<div" + attrs + ">" +
       '<span class="pano-rank num">' + (index + 1) + "</span>" +
-      '<span class="pano-name">' + esc(item.name || "—") + (kind ? '<i class="rg-kind">' + kind + "</i>" : "") + "</span>" +
+      '<span class="pano-name">' + esc(name) + (kind ? '<i class="rg-kind">' + kind + "</i>" : "") + "</span>" +
       '<span class="pano-cell num ' + (isNum(d1) && d1 > 0 ? "up" : isNum(d1) && d1 < 0 ? "down" : "") + '">' +
         esc(isNum(d1) ? (d1 > 0 ? "+" : "") + fmtFixed(d1, 2) + "%" : DASH) + "</span>" +
       '<span class="pano-cell num ' + (isNum(d5) && d5 > 0 ? "up" : isNum(d5) && d5 < 0 ? "down" : "") + '">' +
         esc(isNum(d5) ? (d5 > 0 ? "+" : "") + fmtFixed(d5, 2) + "%" : DASH) + "</span>" +
       '<span class="pano-cell num ' + (isNum(flow) && flow > 0 ? "up" : isNum(flow) && flow < 0 ? "down" : "") + '">' +
         esc(isNum(flow) ? (flow > 0 ? "+" : "") + fmtFixed(flow, 1) : DASH) + "</span>" +
+      (pickable ? '<span class="pano-chev" aria-hidden="true">›</span>' : "") +
       "</div>";
   }
 
@@ -3611,6 +3630,198 @@
     }
   }
 
+  /* ============================== 板块成分股（点板块榜 → 成分表） ============================== */
+  function ensureBoardDialog() {
+    var dlg = $("#boardDialog");
+    if (dlg) return dlg;
+    dlg = document.createElement("dialog");
+    dlg.id = "boardDialog";
+    dlg.setAttribute("aria-labelledby", "boardDlgTitle");
+    dlg.innerHTML = '<div class="dlg-head"><h2 id="boardDlgTitle">板块成分<span class="dlg-sub">BOARD MEMBERS</span></h2>' +
+      '<button class="btn ghost" id="boardDlgClose" type="button">关闭</button></div>' +
+      '<div class="dlg-body board-dlg-body">' +
+        '<div class="board-meta"><b id="boardMetaName">—</b><span id="boardMetaPct" class="board-meta-num">—</span><span id="boardMetaCount" class="board-meta-num">—</span></div>' +
+        '<div class="tbl-wrap board-tbl-wrap"><table class="tbl tbl-sm board-tbl"><thead><tr>' +
+          '<th class="c-code">代码</th><th>名称</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">成交额</th>' +
+        '</tr></thead><tbody id="boardTbody"></tbody></table></div>' +
+        '<div class="card-empty board-empty" id="boardEmpty" hidden>暂无成分数据</div>' +
+        '<div class="board-foot">点击成分股 → 切换上方 K 线（数据来自新浪行业板块）</div>' +
+      '</div>';
+    document.body.appendChild(dlg);
+    dlg.addEventListener("click", function (ev) { if (ev.target === dlg) closeBoardDialog(); });
+    var closeBtn = $("#boardDlgClose");
+    if (closeBtn) closeBtn.addEventListener("click", closeBoardDialog);
+    var tbody = $("#boardTbody");
+    if (tbody) {
+      tbody.addEventListener("click", function (ev) {
+        var tr = ev.target.closest ? ev.target.closest("tr[data-symbol]") : null;
+        if (!tr) return;
+        var symbol = tr.getAttribute("data-symbol");
+        if (!symbol) return;
+        closeBoardDialog();
+        if (typeof loadKline === "function") void loadKline(symbol, { force: false });
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+    }
+    return dlg;
+  }
+
+  function showBoardDialog(dlg) {
+    if (typeof dlg.showModal === "function") {
+      if (!dlg.open) dlg.showModal();
+    } else {
+      dlg.setAttribute("open", "");
+    }
+  }
+
+  function closeBoardDialog() {
+    var dlg = $("#boardDialog");
+    if (!dlg) return;
+    if (typeof dlg.close === "function") dlg.close();
+    else dlg.removeAttribute("open");
+  }
+
+  function setBoardBody(meta, rowsHtml, emptyText) {
+    var nameEl = $("#boardMetaName");
+    var pctEl = $("#boardMetaPct");
+    var countEl = $("#boardMetaCount");
+    var tbody = $("#boardTbody");
+    var emptyEl = $("#boardEmpty");
+    if (nameEl) nameEl.textContent = meta.name || "—";
+    if (pctEl) {
+      pctEl.textContent = meta.pct || DASH;
+      pctEl.className = "board-meta-num" + (meta.tone ? " " + meta.tone : "");
+    }
+    if (countEl) countEl.textContent = meta.count || "—";
+    if (tbody) tbody.innerHTML = rowsHtml || "";
+    if (emptyEl) {
+      emptyEl.hidden = Boolean(rowsHtml);
+      if (!rowsHtml) emptyEl.textContent = emptyText || "暂无成分数据";
+    }
+  }
+
+  function fmtAmountText(amount) {
+    var amt = num(amount);
+    if (!isNum(amt)) return DASH;
+    if (Math.abs(amt) >= 1e8) return (amt / 1e8).toFixed(2) + "亿";
+    if (Math.abs(amt) >= 1e4) return (amt / 1e4).toFixed(0) + "万";
+    return fmtNum(amt);
+  }
+
+  function renderBoardMembers(payload, fallbackName) {
+    var board = payload && payload.board ? payload.board : null;
+    if (!board) {
+      setBoardBody({ name: fallbackName, pct: DASH, count: "—" }, "", "暂无成分数据");
+      return;
+    }
+    var pct = num(board.pct_chg);
+    var tone = isNum(pct) && pct > 0 ? "up" : isNum(pct) && pct < 0 ? "down" : "";
+    var members = Array.isArray(board.members) ? board.members : [];
+    setBoardBody(
+      {
+        name: board.name || fallbackName,
+        pct: isNum(pct) ? (pct > 0 ? "+" : "") + fmtFixed(pct, 2) + "%" : DASH,
+        tone: tone,
+        count: "成分 " + fmtInt(members.length) + " 只"
+      },
+      members.map(function (m) {
+        var mc = num(m.pct_chg);
+        var cls = isNum(mc) && mc > 0 ? "up" : isNum(mc) && mc < 0 ? "down" : "flat";
+        return '<tr class="board-row" data-symbol="' + esc(m.code) + '">' +
+          '<td class="num">' + esc(m.code) + '</td>' +
+          '<td class="board-name-cell">' + esc(m.name) + '</td>' +
+          '<td class="num">' + (isNum(num(m.price)) ? fmtFixed(num(m.price), 2) : DASH) + '</td>' +
+          '<td class="num ' + cls + '">' + (isNum(mc) ? (mc > 0 ? "+" : "") + fmtFixed(mc, 2) + "%" : DASH) + '</td>' +
+          '<td class="num muted">' + esc(fmtAmountText(num(m.amount))) + '</td>' +
+        '</tr>';
+      }).join(""),
+      "暂无成分数据"
+    );
+  }
+
+  function ensureBoardIndex() {
+    if (state.boardIndex) return Promise.resolve(state.boardIndex);
+    if (state.boardIndexPromise) return state.boardIndexPromise;
+    state.boardIndexPromise = getJSON(EP.boardMembers, { timeoutMs: 12000 }).then(function (r) {
+      if (r.challenge) { noteChallenge(); return null; }
+      if (r.rateLimited) { startRateLimit(r.retryAfter); return null; }
+      if (r.error || !r.data || !Array.isArray(r.data.boards)) return null;
+      var map = {};
+      r.data.boards.forEach(function (b) { if (b && b.name) map[b.name] = b; });
+      state.boardIndex = map;
+      return map;
+    }).catch(function () {
+      return null;
+    }).then(function (value) {
+      state.boardIndexPromise = null;
+      return value;
+    });
+    return state.boardIndexPromise;
+  }
+
+  function openBoardDetail(boardName) {
+    var name = String(boardName || "").trim();
+    if (!name) return;
+    var dlg = ensureBoardDialog();
+    showBoardDialog(dlg);
+    setBoardBody({ name: name, pct: "加载中…", count: "—" }, "", "正在加载成分股…");
+    ensureBoardIndex().then(function (map) {
+      if (!map) {
+        setBoardBody({ name: name, pct: DASH, count: "—" }, "", "板块成分数据暂不可用，请稍后重试");
+        return null;
+      }
+      var board = map[name];
+      if (!board) {
+        var target = name.replace(/\s+/g, "");
+        Object.keys(map).some(function (key) {
+          var norm = key.replace(/\s+/g, "");
+          if (norm === target || norm.indexOf(target) >= 0 || target.indexOf(norm) >= 0) board = map[key];
+          return Boolean(board);
+        });
+      }
+      if (!board) {
+        setBoardBody({ name: name, pct: DASH, count: "—" }, "", "未找到该板块的成分数据");
+        return null;
+      }
+      return getJSON(EP.boardMembers + "?code=" + encodeURIComponent(board.code), { timeoutMs: 12000 }).then(function (r) {
+        if (r.challenge) {
+          noteChallenge();
+          setBoardBody({ name: name, pct: DASH, count: "—" }, "", "需要完成访问验证后查看成分股");
+          return;
+        }
+        if (r.rateLimited) {
+          startRateLimit(r.retryAfter);
+          setBoardBody({ name: name, pct: DASH, count: "—" }, "", "请求过于频繁，请稍后重试");
+          return;
+        }
+        if (r.error || !r.data) {
+          setBoardBody({ name: name, pct: DASH, count: "—" }, "", "板块成分数据暂不可用，请稍后重试");
+          return;
+        }
+        renderBoardMembers(r.data, name);
+      });
+    }).catch(function () {
+      setBoardBody({ name: name, pct: DASH, count: "—" }, "", "板块成分数据暂不可用，请稍后重试");
+    });
+  }
+
+  function bindBoardLeaders() {
+    var box = $("#panoLeaders");
+    if (!box || box.dataset.boardBound) return;
+    box.dataset.boardBound = "1";
+    box.addEventListener("click", function (ev) {
+      var row = ev.target.closest ? ev.target.closest(".pano-row[data-board]") : null;
+      if (row) openBoardDetail(row.getAttribute("data-board"));
+    });
+    box.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      var row = ev.target.closest ? ev.target.closest(".pano-row[data-board]") : null;
+      if (!row) return;
+      ev.preventDefault();
+      openBoardDetail(row.getAttribute("data-board"));
+    });
+  }
+
   /* ============================== 全市场搜索 ============================== */
   function highlightMatch(text, query) {
     var value = String(text || "");
@@ -3623,15 +3834,25 @@
 
   function ensureMarketAll() {
     if (state.marketAll !== undefined && state.marketAll !== null) return Promise.resolve(state.marketAll);
+    if (state.marketAllLoading) return state.marketAllLoading;
+    if (state.marketAllFailedAt && Date.now() - state.marketAllFailedAt < 30000) return Promise.resolve([]);
     state.marketAll = null;
-    return getJSON(EP.marketAll, { timeoutMs: 25000 }).then(function (r) {
+    state.marketAllLoading = getJSON(EP.marketAll, { timeoutMs: 25000 }).then(function (r) {
       var d = (r && r.data) || {};
-      state.marketAll = d.stocks || [];
-      return state.marketAll;
+      var stocks = Array.isArray(d.stocks) ? d.stocks : [];
+      state.marketAll = stocks;
+      state.marketAllFailedAt = 0;
+      return stocks;
     }).catch(function () {
-      state.marketAll = [];
+      // 失败不永久缓存：30s 后允许重试（避免网络抖动导致整个会话表格/联想都是空）
+      state.marketAll = null;
+      state.marketAllFailedAt = Date.now();
       return [];
+    }).then(function (value) {
+      state.marketAllLoading = null;
+      return value;
     });
+    return state.marketAllLoading;
   }
 
   function initGlobalSearch() {
@@ -5106,7 +5327,7 @@
       var score = Number(sent.score || 0);
       var label = sent.label || "中性";
       var stateName = score < 25 ? "lean_bear" : (score >= 65 && sent.state !== "divergence" ? "lean_bull" : "range");
-      var sectorRows = (((d.sectors || {}).industry || {}).gainers || []).slice(0, 5).map(function (g) {
+      var sectorRows = (((d.sectors || {}).industry || {}).gainers || []).slice(0, 10).map(function (g) {
         return { name: g.name, pct_1d: g.pct_chg, pct_5d: null, net_inflow: g.net_inflow, leader: g.leader };
       });
       var hs300 = (d.indices || []).filter(function (i) { return i.code === "000300"; })[0] || null;

@@ -13,6 +13,8 @@ export interface Env {
   WORKER_VERSION?: string;
   /** 部署后的公开地址（Cron 预热缓存 key 用，如 https://personal-quant-worker.xiongkong520.workers.dev） */
   WORKER_PUBLIC_URL?: string;
+  /** 可选：板块成分股静态数据地址覆盖（本地 dev 指向本机文件服务；生产不配置，默认 GitHub raw） */
+  BOARD_MEMBERS_URL?: string;
   /** 限流（次/分钟/客户端 IP），默认 120；测试可调小/调大 */
   RATE_LIMIT_PER_MIN?: string;
   /** 测试用：设为 "1" 时忽略交易时段限制强制刷新（正式环境不要设置） */

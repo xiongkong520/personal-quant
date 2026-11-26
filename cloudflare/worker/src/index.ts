@@ -18,6 +18,7 @@
  *   GET  /api/intraday         指数实时分时（东财 trends2，30s 缓存）
  *   GET  /api/kline            个股/指数实时 K 线（东财，60s 缓存 + 模块内 5 分钟缓存）
  *   GET  /api/boards           行业板块榜（来自 market-overview，120s 缓存）
+ *   GET  /api/board-members    板块成分股（reports/board_members.json 静态数据，60s 缓存，?code= 过滤）
  *   GET  /api/signals /api/stream /api/search /api/stock
  *   GET  /api/paper            模拟盘聚合（account_snapshot + positions + order_log）
  *   GET  /api/account /api/positions /api/orders /api/signal-log
@@ -40,6 +41,7 @@ import {
   toLegacyMarketSnapshot,
 } from "./market_overview.ts";
 import { fetchRealtimeKline, indexName, isIndexSymbol } from "./index_kline.ts";
+import { boardDetailFromPayload, boardIndexFromPayload, loadBoardMembersPayload } from "./board_members.ts";
 import { searchStocks } from "./search.ts";
 import { generateAiInsight, getAiInsight } from "./ai_proxy.ts";
 import {
@@ -322,6 +324,7 @@ async function handleHealth(env: Env): Promise<Response> {
         "GET /api/kline",
         "GET /api/intraday",
         "GET /api/boards",
+        "GET /api/board-members",
         "GET /api/signals",
         "GET /api/stream",
         "GET /api/search",
@@ -764,6 +767,25 @@ async function handleBoards(url: URL): Promise<Response> {
     updated_at: overview["asof"],
     degraded: Boolean((overview["quality"] as Record<string, unknown> | undefined)?.["degraded"]),
   });
+}
+
+/** GET /api/board-members?code=new_blhy：板块成分股（静态数据 → 60s 边缘缓存）。 */
+async function handleBoardMembers(env: Env, url: URL): Promise<Response> {
+  const code = (url.searchParams.get("code") ?? "").trim().toLowerCase();
+  if (code && !/^[a-z0-9_]{2,32}$/.test(code)) {
+    return errorResponse(400, "invalid_code", "code 参数格式不正确（如 new_blhy）");
+  }
+  let payload;
+  try {
+    payload = await loadBoardMembersPayload(env);
+  } catch (err) {
+    console.error(`[worker] board-members 读取失败：${err instanceof Error ? err.message : String(err)}`);
+    return errorResponse(503, "data_unavailable", "板块成分数据暂不可用，请稍后重试");
+  }
+  if (!code) return jsonResponse(boardIndexFromPayload(payload));
+  const detail = boardDetailFromPayload(payload, code);
+  if (!detail) return errorResponse(404, "board_not_found", "未找到该板块的成分数据");
+  return jsonResponse(detail);
 }
 
 /** GET /api/intraday?code=sh000001：指数实时分时（东财 trends2，30s 缓存）。 */
@@ -1349,6 +1371,11 @@ export default {
       }
       if (path === "/api/boards") {
         return routeWithGuard(["GET"], async () => cachedRoute(request, env, 120, () => handleBoards(url)));
+      }
+      if (path === "/api/board-members") {
+        return routeWithGuard(["GET"], async () =>
+          cachedRoute(request, env, 60, () => handleBoardMembers(env, url), cacheDecorate(60)),
+        );
       }
       if (path === "/api/intraday") {
         return routeWithGuard(["GET"], async () => cachedRoute(request, env, 30, () => handleIntraday(url)));

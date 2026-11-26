@@ -1439,6 +1439,46 @@ dialog::backdrop { background: rgba(5, 7, 11, 0.68); }
 .pano-bar i { display: block; height: 100%; border-radius: 2px; }
 .pano-bar i.up { background: var(--up); }
 .pano-bar i.down { background: var(--down); }
+/* ---- 板块成分股（点板块榜 → 成分表弹层） ---- */
+.pano-row-pick {
+  grid-template-columns: 20px minmax(0, 1fr) 54px 54px 62px 12px;
+  cursor: pointer;
+}
+.pano-row-pick:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  background: var(--bg-2);
+}
+.pano-chev {
+  font-style: normal; text-align: center; line-height: 1;
+  font-size: 11px; color: var(--text-2);
+  transition: color 140ms var(--ease-out), transform 140ms var(--ease-out);
+}
+.pano-row-pick:hover .pano-chev { color: var(--text-0); transform: translateX(1px); }
+#boardDialog { width: min(640px, calc(100vw - 24px)); }
+.board-dlg-body {
+  display: flex; flex-direction: column; min-height: 0;
+  padding: 0; max-height: min(78vh, 720px); overflow: hidden;
+}
+.board-meta {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
+  padding: 10px 14px 9px; border-bottom: var(--hair);
+}
+.board-meta b { font-size: 13px; font-weight: 600; color: var(--text-0); }
+.board-meta-num { font-family: var(--font-num); font-size: 10px; color: var(--text-2); }
+.board-meta-num.up { color: var(--up); }
+.board-meta-num.down { color: var(--down); }
+.board-tbl-wrap { overflow: auto; max-height: min(52vh, 470px); }
+.board-tbl { table-layout: fixed; }
+.board-tbl .c-code { width: 22%; }
+.board-tbl tbody tr.board-row { cursor: pointer; }
+.board-tbl .board-name-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-empty { margin: 12px 14px; }
+.board-foot { padding: 8px 14px 10px; border-top: var(--hair); font-size: 9.5px; color: var(--text-2); }
+@media (max-width: 640px) {
+  .board-tbl-wrap { max-height: 56vh; }
+  .board-tbl .c-code { width: 26%; }
+}
 
 /* ---- 今日走势 ---- */
 .today-card .card-head { min-height: 42px; }
@@ -1702,6 +1742,8 @@ dialog::backdrop { background: rgba(5, 7, 11, 0.68); }
 .mkt-all-tools { display: flex; gap: 8px; margin: 8px 0; }
 .market-all-filter { flex: 1; min-width: 0; background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; color: var(--text-0); padding: 7px 10px; font-size: 13px; }
 .market-all-sort { background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; color: var(--text-1); padding: 7px 8px; font-size: 12px; }
-.market-all-wrap { max-height: 420px; overflow-y: auto; }
+.market-all-wrap { max-height: 460px; }
+.market-all-wrap .tbl thead th { background: var(--bg-1); }
+.market-all-empty { padding: 18px 0; text-align: center; color: var(--text-1); font-size: 12px; }
 .market-all-row { cursor: pointer; }
 .market-all-pager { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; color: var(--text-1); }
