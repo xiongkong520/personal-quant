@@ -261,6 +261,14 @@ def export_to_cloudflare(cfg: dict, timeout: float = 20.0) -> dict[str, Any]:
     else:
         result["backtest"] = {"pushed": 0, "note": "无回测报告，先跑 quant.cli backtest"}
 
+    ai = _read_json(reports / "ai_reports.json")
+    if ai:
+        resp = httpx.post(f"{base}/api/ai/ingest", json={"schema": 1, "insight": ai}, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        result["ai"] = {"pushed": 1, "status": resp.status_code}
+    else:
+        result["ai"] = {"pushed": 0, "note": "无 AI 报告，先跑 python -m quant.data.ai_analysis"}
+
     try:
         from quant.paper.engine import snapshot
 

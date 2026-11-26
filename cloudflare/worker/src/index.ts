@@ -33,6 +33,8 @@
 import modelJson from "../models/model.json" with { type: "json" };
 
 import { confidenceOf, directionOf, predictProba, validateModel, type QuantModel } from "./model.ts";
+import { generateAiInsight, getAiInsight, ingestAiInsight, type AiInsight } from "./ai_proxy.ts";
+import { applyCacheHeaders, PassthroughError, withEdgeCache, type CachedResult } from "./cache.ts";
 import { refreshMarketLive } from "./market_live.ts";
 import { buildMarketSummary, handleScheduledCron, refreshIntradayIndex, runManualDailySync, syncDailyClose } from "./daily_sync.ts";
 import {
@@ -113,6 +115,38 @@ function jsonResponse(data: unknown, status = 200, extraHeaders: Record<string, 
       ...extraHeaders,
     },
   });
+}
+
+/**
+ * GET 数据接口统一边缘缓存包装（模块一）：
+ * - **先鉴权后缓存**：未通过人机验证（或无信任 IP）时直接 401，绝不返回缓存内容；
+ * - 60s 缓存命中直接返回（X-Cache: HIT），不穿透外部行情源；
+ * - 上游失败返回最近一次有效快照（X-Cache: STALE）；
+ * - 非 200（challenge/参数错误/限流）原样放行，不写缓存、不拿 lkg 冒充。
+ */
+async function cachedRoute(
+  request: Request,
+  env: Env,
+  ttlSec: number,
+  handler: () => Promise<Response>,
+  decorate?: (data: unknown, result: CachedResult) => unknown,
+): Promise<Response> {
+  // 鉴权必须在缓存读取之前（否则 fresh HIT 会绕过 challenge），
+  // 可信 IP 由 requireChallenge 内部豁免。
+  const challenge = await requireChallenge(request, env);
+  if (challenge) return challenge;
+  try {
+    const result = await withEdgeCache(request, ttlSec, async () => {
+      const resp = await handler();
+      if (resp.status !== 200) throw new PassthroughError(resp);
+      return await resp.json();
+    }, env.DB);
+    const payload = decorate ? decorate(result.data, result) : result.data;
+    return applyCacheHeaders(jsonResponse(payload, 200), { ...result });
+  } catch (err) {
+    if (err instanceof PassthroughError) return err.response;
+    return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  }
 }
 
 function errorResponse(status: number, error: string, message: string, extra: Record<string, unknown> = {}): Response {
@@ -1224,7 +1258,7 @@ export default {
       if (path === "/api/events") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleEvents(request, env, url));
+        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleEvents(request, env, url)));
       }
       if (path === "/api/events/ingest") {
         const guard = methodGuard(request, ["POST"]);
@@ -1254,7 +1288,7 @@ export default {
       if (path === "/api/kline") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleKline(request, env, url));
+        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleKline(request, env, url)));
       }
       if (path === "/api/kline/ingest") {
         const guard = methodGuard(request, ["POST"]);
@@ -1264,7 +1298,7 @@ export default {
       if (path === "/api/regime") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleRegime(request, env));
+        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleRegime(request, env)));
       }
       if (path === "/api/regime/ingest") {
         const guard = methodGuard(request, ["POST"]);
@@ -1279,7 +1313,7 @@ export default {
       if (path === "/api/market") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleMarket(request, env));
+        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleMarket(request, env)));
       }
       if (path === "/api/market/ingest") {
         const guard = methodGuard(request, ["POST"]);
@@ -1289,22 +1323,70 @@ export default {
       if (path === "/api/intraday") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleIntraday(request, env, url));
+        return applySecurityHeaders(await cachedRoute(request, env, 30, () => handleIntraday(request, env, url)));
       }
       if (path === "/api/market/history") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleMarketHistory(request, env, url));
+        return applySecurityHeaders(await cachedRoute(request, env, 120, () => handleMarketHistory(request, env, url)));
       }
       if (path === "/api/boards") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleBoards(request, env, url));
+        return applySecurityHeaders(await cachedRoute(request, env, 120, () => handleBoards(request, env, url)));
+      }
+      if (path === "/api/ai/insight") {
+        const guard = methodGuard(request, ["GET"]);
+        if (guard) return applySecurityHeaders(guard);
+        const challengeGuard = await requireChallenge(request, env);
+        if (challengeGuard) return applySecurityHeaders(challengeGuard);
+        const insight = await getAiInsight(env);
+        if (!insight) {
+          return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: false, message: "AI 洞察尚未生成" }, 404));
+        }
+        return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, insight, updated_at: insight.generated_at }));
+      }
+      if (path === "/api/ai/generate") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        const token = readIngestToken(env);
+        const got = extractIngestToken(request);
+        if (!token || !got || !timingSafeEqual(got, token)) {
+          return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401));
+        }
+        try {
+          const insight = await generateAiInsight(env, true);
+          return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, insight }));
+        } catch {
+          return applySecurityHeaders(errorResponse(503, "ai_unavailable", "AI 服务暂不可用，请稍后重试"));
+        }
+      }
+      if (path === "/api/ai/ingest") {
+        const guard = methodGuard(request, ["POST"]);
+        if (guard) return applySecurityHeaders(guard);
+        const token = readIngestToken(env);
+        const got = extractIngestToken(request);
+        if (!token || !got || !timingSafeEqual(got, token)) {
+          return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401));
+        }
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return applySecurityHeaders(errorResponse(400, "invalid_json", "请求体不是合法 JSON"));
+        }
+        const raw = body as Record<string, unknown> | null;
+        const insight = (raw && typeof raw["insight"] === "object" && raw["insight"] !== null ? raw["insight"] : raw) as unknown as AiInsight;
+        if (!insight || typeof insight !== "object") {
+          return applySecurityHeaders(errorResponse(400, "invalid_body", "缺少 AI 报告内容"));
+        }
+        await ingestAiInsight(insight);
+        return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1 }));
       }
       if (path === "/api/summary/latest") {
         const guard = methodGuard(request, ["GET"]);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleSummaryLatest(request, env));
+        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleSummaryLatest(request, env)));
       }
       if (path === "/api/summaries") {
         const guard = methodGuard(request, ["GET"]);
