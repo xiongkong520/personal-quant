@@ -1380,7 +1380,7 @@ export default {
         if (!insight || typeof insight !== "object") {
           return applySecurityHeaders(errorResponse(400, "invalid_body", "缺少 AI 报告内容"));
         }
-        await ingestAiInsight(insight);
+        await ingestAiInsight(insight, env);
         return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1 }));
       }
       if (path === "/api/summary/latest") {

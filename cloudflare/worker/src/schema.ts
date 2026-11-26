@@ -109,6 +109,13 @@ export const SCHEMA_STATEMENTS: string[] = [
   PRIMARY KEY (trade_date, session)
 )`,
   `CREATE INDEX IF NOT EXISTS idx_market_summaries_asof ON market_summaries (asof DESC)`,
+  `CREATE TABLE IF NOT EXISTS edge_cache (
+  cache_key  TEXT PRIMARY KEY,
+  payload    TEXT NOT NULL,
+  cached_at  INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+)`,
+  `CREATE INDEX IF NOT EXISTS idx_edge_cache_expires ON edge_cache (expires_at)`,
 ];
 
 export const SCHEMA_SQL = `${SCHEMA_STATEMENTS.join(";\n\n")};\n`;

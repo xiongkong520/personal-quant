@@ -1595,3 +1595,62 @@ dialog::backdrop { background: rgba(5, 7, 11, 0.68); }
 .mkt-split { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
 .pill.divergence { color: #f5a524; border-color: rgba(245, 165, 36, .5); background: rgba(245, 165, 36, .1); }
 .pill.cold { color: #6aa9ff; border-color: rgba(106, 169, 255, .45); background: rgba(106, 169, 255, .08); }
+
+/* 市场全景：涨跌分布 · 涨停结构（task-12 补完） */
+.pano-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr) minmax(0, 0.95fr); }
+.pano-dist { display: flex; flex-direction: column; gap: 10px; padding-top: 2px; }
+.pano-dist-nums { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.dist-num { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.dist-num span { font-size: 8.5px; color: var(--text-2); }
+.dist-num b { font-family: var(--font-num); font-size: 17px; font-weight: 500; line-height: 1.1; }
+.dist-num i { font-family: var(--font-num); font-style: normal; font-size: 9px; color: var(--text-2); }
+.dist-num.up b { color: var(--up); }
+.dist-num.down b { color: var(--down); }
+.dist-num.flat b { color: var(--text-1); }
+.pano-dist-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--bg-2); }
+.pano-dist-bar i.up { background: var(--up); }
+.pano-dist-bar i.flat { background: var(--flat); }
+.pano-dist-bar i.down { background: var(--down); }
+.pano-limit-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.pano-limit-grid > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pano-limit-grid span { font-size: 8.5px; color: var(--text-2); white-space: nowrap; }
+.pano-limit-grid b { font-family: var(--font-num); font-size: 12px; font-weight: 500; color: var(--text-0); white-space: nowrap; }
+.pano-limit-grid b.up { color: var(--up); }
+.pano-limit-grid b.down { color: var(--down); }
+.pano-note { margin: 0; font-size: 8.5px; line-height: 1.5; color: var(--text-2); }
+@media (max-width: 1200px) { .pano-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .pano-dist-block { grid-column: span 2; border-bottom: var(--hair); } }
+@media (max-width: 760px) {
+  .pano-grid { grid-template-columns: minmax(0, 1fr); }
+  .pano-dist-block { grid-column: auto; border-bottom: 0; }
+  .pano-limit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 6px; }
+  .dist-num b { font-size: 15px; }
+}
+
+/* ============================== P1 应用框架（页面导航 / 页面标题 / 底部 Tab） ============================== */
+[hidden] { display: none !important; }
+.page-tabs { display: flex; align-items: center; gap: 2px; max-width: 1560px; margin: 0 auto; padding: 0 24px; height: 40px; border-bottom: var(--hair); overflow-x: auto; scrollbar-width: none; }
+.page-tabs::-webkit-scrollbar { display: none; }
+.page-tab { flex: none; padding: 9px 12px; font-size: 12.5px; color: var(--text-1); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.page-tab:hover { color: var(--text-0); }
+.page-tab.is-active { color: var(--text-0); border-bottom-color: var(--accent); font-weight: 600; }
+.page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; max-width: 1560px; margin: 0 auto; padding: 18px 24px 4px; }
+.page-kicker { font-family: var(--font-num); font-size: 9.5px; letter-spacing: 0.18em; color: var(--text-2); }
+.page-title { margin: 3px 0 0; font-size: 21px; font-weight: 650; letter-spacing: 0.02em; line-height: 1.2; }
+.page-sub { margin: 0 0 2px; font-size: 12px; color: var(--text-2); }
+.tab-bar { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; background: rgba(10, 14, 20, 0.97); border-top: var(--hair); backdrop-filter: blur(10px); padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); }
+.tab-item { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 48px; font-size: 10.5px; color: var(--text-2); text-decoration: none; border-radius: 8px; }
+.tab-item .icon { width: 19px; height: 19px; }
+.tab-item.is-active { color: var(--text-0); background: var(--bg-1); }
+.page-placeholder .ph-body { padding: 0 16px 16px; }
+.ph-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.ph-block { border: var(--hair); border-radius: 8px; padding: 12px 14px; background: var(--bg-1); }
+.ph-block h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.ph-block p { margin: 0; font-size: 12.5px; line-height: 1.65; color: var(--text-1); }
+@media (max-width: 899px) {
+  .page-tabs { display: none; }
+  .tab-bar { display: flex; }
+  main.app { padding-bottom: 88px; }
+  .page-head { padding: 12px 16px 2px; }
+  .page-title { font-size: 17px; }
+  .page-sub { display: none; }
+}

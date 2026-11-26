@@ -18,6 +18,140 @@
   var MODE = window.QT_MODE === "cloud" ? "cloud" : "local";
   var IS_CLOUD = MODE === "cloud";
 
+
+  /* ============================== 页面框架与导航（P1） ============================== */
+  var PAGE_ICONS = {
+    dashboard: '<rect x="3" y="3" width="7.2" height="7.2" rx="1.6"/><rect x="13.8" y="3" width="7.2" height="7.2" rx="1.6"/><rect x="3" y="13.8" width="7.2" height="7.2" rx="1.6"/><rect x="13.8" y="13.8" width="7.2" height="7.2" rx="1.6"/>',
+    market: '<path d="M3.5 16.5 8 11.8l3.2 3.1L21 5.6"/><path d="M3.5 20.2h17"/>',
+    factor: '<path d="M4 5h16M6.5 10h11M9 15h6M10.5 20h3"/>',
+    model: '<rect x="6.5" y="6.5" width="11" height="11" rx="2"/><path d="M9.5 2.8v3M14.5 2.8v3M9.5 18.2v3M14.5 18.2v3M2.8 9.5h3M2.8 14.5h3M18.2 9.5h3M18.2 14.5h3"/>',
+    backtest: '<path d="M7.5 4.8v14.4L19 12z"/>',
+    paper: '<rect x="3" y="6.5" width="18" height="12.5" rx="2.2"/><path d="M3 10.5h18M15.5 15h3"/>',
+    data: '<ellipse cx="12" cy="6.2" rx="7.2" ry="2.8"/><path d="M4.8 6.2v11.6c0 1.6 3.2 2.9 7.2 2.9s7.2-1.3 7.2-2.9V6.2"/><path d="M4.8 12c0 1.6 3.2 2.9 7.2 2.9s7.2-1.3 7.2-2.9"/>',
+    settings: '<circle cx="12" cy="12" r="3.1"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.9 1.9M16.6 16.6l1.9 1.9M18.5 5.5l-1.9 1.9M7.4 16.6l-1.9 1.9"/>'
+  };
+  function pageIcon(id) {
+    return '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' + (PAGE_ICONS[id] || "") + "</svg>";
+  }
+  var PAGES = [
+    { id: "dashboard", label: "总览", sub: "市场状态 · 指数 · 信号 · 摘要" },
+    { id: "market", label: "行情中心", sub: "指数 K 线 · 分时 · 板块 · 事件" },
+    { id: "factor", label: "因子实验室", sub: "因子评估 · IC/ICIR · 分层回测" },
+    { id: "model", label: "模型训练", sub: "模型版本 · 训练指标 · 特征贡献" },
+    { id: "backtest", label: "策略回测", sub: "净值 · 指标 · 基准对比" },
+    { id: "paper", label: "模拟交易", sub: "账户 · 持仓 · 订单 · 净值" },
+    { id: "data", label: "数据管理", sub: "数据源 · 覆盖 · 更新状态" },
+    { id: "settings", label: "系统设置", sub: "主题 · 刷新 · 关于" }
+  ];
+  var PAGE_MAP = {};
+  PAGES.forEach(function (p) { PAGE_MAP[p.id] = p; });
+  var MOBILE_TABS = ["dashboard", "market", "backtest", "paper", "settings"];
+
+  function pageFromHash() {
+    var raw = String(location.hash || "").replace(/^#\/?/, "").trim();
+    return PAGE_MAP[raw] ? raw : "dashboard";
+  }
+  function buildNav() {
+    var tabs = $("#pageTabs");
+    if (tabs) {
+      tabs.innerHTML = PAGES.map(function (p) {
+        return '<a class="page-tab" data-page="' + p.id + '" href="#/' + p.id + '">' + esc(p.label) + "</a>";
+      }).join("");
+    }
+    var bar = $("#tabBar");
+    if (bar) {
+      bar.innerHTML = MOBILE_TABS.map(function (id) {
+        var p = PAGE_MAP[id];
+        return '<a class="tab-item" data-page="' + p.id + '" href="#/' + p.id + '">' + pageIcon(p.id) + "<span>" + esc(p.label) + "</span></a>";
+      }).join("");
+    }
+  }
+  function applyPage(page) {
+    var target = PAGE_MAP[page] ? page : "dashboard";
+    state.page = target;
+    var meta = PAGE_MAP[target];
+    $$("#main > section").forEach(function (sec) {
+      var cardPage = sec.getAttribute("data-page") || "dashboard";
+      if (cardPage !== target) sec.setAttribute("hidden", "");
+      else sec.removeAttribute("hidden");
+    });
+    if ($("#pageTitle")) setText($("#pageTitle"), meta.label);
+    if ($("#pageSub")) setText($("#pageSub"), meta.sub);
+    document.title = meta.label + " · 个人量化研究平台";
+    $$("#pageTabs .page-tab").forEach(function (el) {
+      el.classList.toggle("is-active", el.getAttribute("data-page") === target);
+    });
+    $$("#tabBar .tab-item").forEach(function (el) {
+      el.classList.toggle("is-active", el.getAttribute("data-page") === target);
+    });
+    void ensurePageData(target);
+  }
+  function navigate(page) {
+    if (location.hash !== "#/" + page) location.hash = "#/" + page;
+    applyPage(page);
+  }
+  function ensurePageData(page) {
+    if (page === "dashboard") {
+      if (!state.market) void loadMarket();
+      if (!state.regime) void loadRegime();
+    } else if (page === "market") {
+      void loadIntraday(state.intraday.code);
+    } else if (page === "backtest") {
+      if (!state.backtest) void loadBacktest();
+    } else if (page === "paper") {
+      if (!state.paper) void loadPaper();
+    }
+  }
+  function placeholderPage(id, title, bodyHtml) {
+    if (document.getElementById("ph-" + id)) return;
+    var main = $("#main");
+    if (!main) return;
+    var sec = document.createElement("section");
+    sec.className = "card span-12 page-placeholder";
+    sec.id = "ph-" + id;
+    sec.setAttribute("data-page", id);
+    sec.innerHTML =
+      '<header class="card-head"><div><p class="eyebrow">规划中</p><h2>' + esc(title) + "</h2></div>" +
+      '<div class="card-meta"><span class="tag">开发中</span></div></header>' +
+      '<div class="ph-body">' + bodyHtml + "</div>";
+    main.insertBefore(sec, main.firstChild);
+  }
+  function createPlaceholderPages() {
+    placeholderPage("factor", "因子实验室",
+      '<div class="ph-grid">' +
+      '<div class="ph-block"><h3>本地已具备</h3><p>因子库 18 个价量因子 + IC/RankIC/ICIR/分层回测评估（data/reports/factor_eval.json），本地报告可查看。</p></div>' +
+      '<div class="ph-block"><h3>待接入云端</h3><p>新增 /api/factors 接口并由每日任务推送后，此页将展示：因子 IC 排名、分层收益、单调性、因子相关性。</p></div>' +
+      "</div>");
+    placeholderPage("model", "模型训练",
+      '<div class="ph-grid">' +
+      '<div class="ph-block"><h3>已具备</h3><p>Walk-forward 回测指标（方向准确率/胜率/回撤/夏普）已在「策略回测」页展示；模型版本 v0.1.0。</p></div>' +
+      '<div class="ph-block"><h3>待接入</h3><p>模型训练指标（训练集准确率、特征数、最近训练时间）需 /api/model-meta 接口后接入。</p></div>' +
+      "</div>");
+    placeholderPage("data", "数据管理",
+      '<div class="ph-grid">' +
+      '<div class="ph-block"><h3>当前数据源</h3><p>云端：东财 → 腾讯 → 新浪多源兜底；本地：AKShare → 新浪 → Baostock 三级兜底；iFinD 官方 API 审批中。</p></div>' +
+      '<div class="ph-block"><h3>待接入</h3><p>数据源健康检查 / K 线覆盖统计 / 更新记录需 /api/data-status 接口后展示。</p></div>' +
+      "</div>");
+    placeholderPage("settings", "系统设置",
+      '<div class="ph-grid">' +
+      '<div class="ph-block"><h3>关于</h3><p>个人量化研究平台 · 数据来自公开接口 · 研究用途，不构成投资建议。</p></div>' +
+      '<div class="ph-block"><h3>数据与隐私</h3><p>不采集个人数据；模拟盘为模拟撮合，不连接券商、不保存交易密钥。</p></div>' +
+      '<div class="ph-block"><h3>更新方式</h3><p>盘中数据由 Cloudflare Worker Cron 自动更新；模型与回测由每日任务生成。</p></div>' +
+      "</div>");
+  }
+  function initShell() {
+    buildNav();
+    createPlaceholderPages();
+    $$("#pageTabs .page-tab, #tabBar .tab-item").forEach(function (el) {
+      el.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        navigate(el.getAttribute("data-page"));
+      });
+    });
+    window.addEventListener("hashchange", function () { applyPage(pageFromHash()); });
+    applyPage(pageFromHash());
+  }
+
   var EP = {
     config: "/api/config",
     signals: "/api/signals",
@@ -621,9 +755,8 @@
     }
     return wait(420).then(function () {
       closeGate();
-      void refreshAll("after-gate");
-      if (IS_CLOUD) { state.streamBackoff = 1000; state.streamPaused = false; startStream(); }
-      else startPolling();
+      // 验证通过（cookie 已写入）才串行启动数据流
+      return beginDataFlow("after-gate");
     });
   }
 
@@ -686,8 +819,9 @@
     var until = Date.now() + sec * 1000;
     if (until <= state.rateLimitUntil) return;
     state.rateLimitUntil = until;
+    // S1：429 不弹遮挡层，改为顶部状态徽章（连接状态区显示限流倒计时）
     var notice = $("#notice");
-    if (notice) notice.hidden = false;
+    if (notice) notice.hidden = true;
     stopPolling();
     if (state.rateLimitTimer) clearInterval(state.rateLimitTimer);
     state.rateLimitTimer = setInterval(tickRateLimit, 1000);
@@ -709,6 +843,12 @@
       return;
     }
     if (count) count.textContent = left + "s";
+    var connEl = $("#connState");
+    if (connEl) {
+      connEl.dataset.state = "degraded";
+      var label = connEl.querySelector("[data-bind='conn.text']");
+      if (label) setText(label, "限流中 " + left + "s");
+    }
   }
 
   function clearRateLimit() {
@@ -2260,6 +2400,7 @@
         '</div>' +
       '</div>';
     main.insertBefore(sec, main.firstChild);
+    sec.dataset.page = "dashboard";
     ensurePanoramaSections();
   }
   function renderMarket(snapshot, updatedAt) {
@@ -2359,6 +2500,7 @@
     card.innerHTML = '<header class="card-head"><div><p class="eyebrow">代码查询</p><h2 id="stockTitle">个股快照</h2></div>' +
       '<div class="card-meta"><span id="stockMeta">—</span></div></header><div id="stockBody" class="stock-body"></div>';
     main.insertBefore(card, main.firstChild);
+    card.dataset.page = "market";
     return card;
   }
   function showStockMessage(text) {
@@ -2638,6 +2780,7 @@
       '<footer class="card-foot"><span id="tdFoot">盘中分时与情绪曲线 · 每 30s 刷新</span><span class="foot-right">研究用途，不构成投资建议</span></footer>';
     var market = $("#marketCard");
     main.insertBefore(sec, market ? market.nextSibling : main.firstChild);
+    sec.dataset.page = "market";
   }
 
   function showTodayMessage(kind, conf) {
@@ -3038,6 +3181,7 @@
     var regime = $("#regimeCard");
     var anchor = today ? today.nextSibling : (regime ? regime.nextSibling : main.firstChild);
     main.insertBefore(sec, anchor);
+    sec.dataset.page = "dashboard";
   }
 
   function summaryTextOf(item) {
@@ -3151,6 +3295,24 @@
     grid.className = "pano-grid";
     grid.id = "panoGrid";
     grid.innerHTML =
+      '<div class="pano-block pano-dist-block">' +
+        '<div class="col-head"><span>涨跌分布 · 涨停结构</span><span class="col-meta" id="panoDistMeta">—</span></div>' +
+        '<div class="pano-dist">' +
+          '<div class="pano-dist-nums">' +
+            '<div class="dist-num up"><span>上涨</span><b class="num" id="panoUp">—</b><i class="num" id="panoUpPct">—</i></div>' +
+            '<div class="dist-num flat"><span>平盘</span><b class="num" id="panoFlat">—</b><i class="num" id="panoFlatPct">—</i></div>' +
+            '<div class="dist-num down"><span>下跌</span><b class="num" id="panoDown">—</b><i class="num" id="panoDownPct">—</i></div>' +
+          '</div>' +
+          '<div class="pano-dist-bar" id="panoDistBar" aria-hidden="true"><i class="up"></i><i class="flat"></i><i class="down"></i></div>' +
+          '<div class="pano-limit-grid">' +
+            '<div><span>涨停</span><b class="num up" id="panoLu">—</b></div>' +
+            '<div><span>跌停</span><b class="num down" id="panoLd">—</b></div>' +
+            '<div><span>涨停/跌停</span><b class="num" id="panoRatio">—</b></div>' +
+            '<div><span>活跃度</span><b class="num" id="panoActive">—</b></div>' +
+          '</div>' +
+          '<p class="pano-note" id="panoNote">连板梯队数据暂未接入，先展示涨跌停家数与分布。</p>' +
+        '</div>' +
+      '</div>' +
       '<div class="pano-block"><div class="col-head"><span>板块涨幅榜 Top10</span><span class="col-meta">当日 / 5日 / 净流入(亿)</span></div>' +
         '<div class="pano-list" id="panoLeaders"><div class="mkt-empty">暂无板块数据</div></div></div>' +
       '<div class="pano-block"><div class="col-head"><span>资金净流入 Top10</span><span class="col-meta">行业 + 概念</span></div>' +
@@ -3175,8 +3337,47 @@
       "</div>";
   }
 
+  function renderPanoramaDist() {
+    var market = state.market || {};
+    var act = market.activity || {};
+    var up = num(act.up);
+    var down = num(act.down);
+    var flat = num(act.flat);
+    var total = Math.max(1, (up || 0) + (down || 0) + (flat || 0));
+    var lu = num(act.limit_up);
+    var ld = num(act.limit_down);
+    setText($("#panoUp"), isNum(up) ? fmtInt(up) : DASH);
+    setText($("#panoDown"), isNum(down) ? fmtInt(down) : DASH);
+    setText($("#panoFlat"), isNum(flat) ? fmtInt(flat) : DASH);
+    setText($("#panoUpPct"), isNum(up) ? (up / total * 100).toFixed(1) + "%" : DASH);
+    setText($("#panoDownPct"), isNum(down) ? (down / total * 100).toFixed(1) + "%" : DASH);
+    setText($("#panoFlatPct"), isNum(flat) ? (flat / total * 100).toFixed(1) + "%" : DASH);
+    setText($("#panoLu"), isNum(lu) ? fmtInt(lu) : DASH);
+    setText($("#panoLd"), isNum(ld) ? fmtInt(ld) : DASH);
+    setText($("#panoRatio"), isNum(lu) && isNum(ld) ? (ld > 0 ? (lu / ld).toFixed(2) : "∞") : DASH);
+    setText($("#panoActive"), isNum(act.active_pct) ? fmtNum(act.active_pct) + "%" : DASH);
+    var bar = $("#panoDistBar");
+    if (bar) {
+      bar.children[0].style.width = ((up || 0) / total * 100) + "%";
+      bar.children[1].style.width = ((flat || 0) / total * 100) + "%";
+      bar.children[2].style.width = ((down || 0) / total * 100) + "%";
+    }
+    var meta = $("#panoDistMeta");
+    if (meta) {
+      var stamp = String(act.asof || market.trade_date || "");
+      var hm = stamp.match(/(\d{2}:\d{2})/);
+      meta.textContent = hm ? "截至 " + hm[1] : (stamp.slice(5, 10) || "—");
+    }
+    var note = $("#panoNote");
+    if (note) {
+      note.textContent = "连板梯队数据暂未接入，先展示涨跌停家数与涨跌分布。";
+      note.hidden = !(isNum(lu) || isNum(ld));
+    }
+  }
+
   function renderPanorama() {
     ensurePanoramaSections();
+    renderPanoramaDist();
     var leaders = (state.regime && state.regime.leaders) || [];
     var top = leaders.slice(0, 10);
     var box = $("#panoLeaders");
@@ -3250,7 +3451,7 @@
       search.items = Array.isArray(items) ? items : [];
       search.active = search.items.length ? 0 : -1;
       render();
-      if (search.open) open();
+      if (String(input.value || "").trim()) open();
     }
     function selectSymbol(symbol, name) {
       if (!/^\d{6}$/.test(symbol)) return;
@@ -3263,6 +3464,7 @@
       announce("已切换到 " + symbol + (name ? " " + name : ""));
     }
     function queryStockCard(symbol, name) {
+      if (!IS_CLOUD) return;
       getJSON(EP.stock + "?symbol=" + encodeURIComponent(symbol)).then(function (r) {
         if (r.challenge) { noteChallenge(); return; }
         if (r.rateLimited) { startRateLimit(r.retryAfter); return; }
@@ -3276,8 +3478,10 @@
       if (!q) { close(); return; }
       if (search.timer) { clearTimeout(search.timer); search.timer = 0; }
       var reqId = ++search.req;
+      search.queryAtReq = q;
       getJSON(EP.search + "?q=" + encodeURIComponent(q) + "&limit=12").then(function (r) {
         if (reqId !== search.req) return;
+        if (String(input.value || "").trim() !== q) return;
         if (r.challenge) { noteChallenge(); return; }
         if (r.rateLimited) { startRateLimit(r.retryAfter); return; }
         if (r.error || !r.data) { applyItems([]); return; }
@@ -3517,6 +3721,7 @@
     var market = $("#marketCard");
     if (market && market.nextSibling) main.insertBefore(sec, market.nextSibling);
     else main.insertBefore(sec, main.firstChild);
+    sec.dataset.page = "market";
   }
   function loadEvents() {
     return getJSON(EP.events + "?limit=40").then(function (r) {
@@ -3672,6 +3877,7 @@
       '</footer>';
     var events = $("#eventsCard");
     main.insertBefore(sec, events ? events.nextSibling : main.firstChild);
+    sec.dataset.page = "market";
   }
 
   function klineWindow() {
@@ -4610,6 +4816,7 @@
       var events = $("#eventsCard");
       main.insertBefore(sec, events ? events.nextSibling : main.firstChild);
     }
+    sec.dataset.page = "dashboard";
   }
 
   function regimeEmptyConf() {
@@ -4913,6 +5120,21 @@
       state.backtest = normBacktest(btPayload);
       renderBacktest();
       return { kind: state.backtest ? "ok" : "empty" };
+    });
+  }
+
+  /** 首屏/验证通过后的数据流（S1：Turnstile 通过后才串行启动，避免并发抢跑触发 429）。 */
+  function beginDataFlow(reason) {
+    return refreshAll(reason || "boot").then(function () {
+      if (IS_CLOUD) startStream();
+      else startPolling();
+      if (typeof applyPage === "function") applyPage(state.page || pageFromHash());
+    }).then(function () {
+      void loadIntraday(state.intraday.code, { force: true });
+      void loadMarketHistory();
+      void loadSummary();
+      var remembered = rememberedKlineSymbol();
+      void loadKline(remembered || "600519", { auto: !remembered });
     });
   }
 
@@ -5224,23 +5446,22 @@
     if (B["foot.gate"]) setText(B["foot.gate"], "人机验证检测中");
 
     void detectGate().then(function () {
-      if (!state.dev) return;
-      renderSignalCard();
-      renderSignalTable();
-      renderPaper();
-      renderEquity();
-      renderBacktest();
-    });
-    void refreshAll("boot").then(function () {
-      if (IS_CLOUD) startStream();
-      else startPolling();
+      // 需要人机验证时：先等验证通过（gate 流程内回调），绝不提前发数据请求
+      if (state.gate.required && !state.gate.passed) {
+        void openGate();
+        return;
+      }
+      if (state.dev) {
+        renderSignalCard();
+        renderSignalTable();
+        renderPaper();
+        renderEquity();
+        renderBacktest();
+      }
+      return beginDataFlow("boot");
     });
     startRealtime();
-    void loadIntraday(state.intraday.code, { force: true });
-    void loadMarketHistory();
-    void loadSummary();
-    var remembered = rememberedKlineSymbol();
-    void loadKline(remembered || "600519", { auto: !remembered });
+    initShell();
   }
 
   /** 桌面/手机统一优先级：市场整体 → K线 → 大盘状态 → 事件 → 其余面板。 */
@@ -5250,7 +5471,7 @@
     var title = $("#signalTitle");
     var anchor = title && title.closest ? title.closest("section") : null;
     if (!anchor) return;
-    ["marketCard", "todayCard", "klineCard", "regimeCard", "summaryCard", "eventsCard"].forEach(function (id) {
+    ["marketCard", "todayCard", "summaryCard", "klineCard", "regimeCard", "eventsCard"].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) main.insertBefore(el, anchor);
     });

@@ -200,7 +200,7 @@ export const AI_CACHE_TTL_SEC = AI_CACHE_TTL;
 
 
 /** 外部（本地/CI）推送 AI 报告并写入缓存（token 保护，见 /api/ai/ingest）。 */
-export async function ingestAiInsight(insight: AiInsight): Promise<void> {
+export async function ingestAiInsight(insight: AiInsight, env?: Env): Promise<void> {
   const payload = {
     schema: 1,
     generated_at: insight.generated_at || nowIsoShanghai(),
@@ -214,4 +214,5 @@ export async function ingestAiInsight(insight: AiInsight): Promise<void> {
       headers: { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=86400" },
     }),
   );
+  if (env) await writeAiInsightDb(env, payload);
 }

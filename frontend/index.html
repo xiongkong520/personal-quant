@@ -60,6 +60,7 @@
       <button class="btn" id="disclaimerBtn" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><span class="btn-label">免责声明</span></button>
     </div>
   </header>
+  <nav class="page-tabs" id="pageTabs" aria-label="页面导航"></nav>
   <div class="notice" id="notice" hidden role="status">
     <svg class="icon" aria-hidden="true"><use href="#i-warning"/></svg>
     <span class="notice-text" data-bind="notice.text">请求过于频繁，稍后重试</span>
@@ -68,10 +69,18 @@
   </div>
 </div>
 
+<div class="page-head" id="pageHead">
+  <div class="page-head-left">
+    <span class="page-kicker">个人量化研究平台 · QUANT RESEARCH DESK</span>
+    <h1 class="page-title" id="pageTitle">总览</h1>
+  </div>
+  <p class="page-sub muted" id="pageSub"></p>
+</div>
+
 <main class="app" id="main">
 
   <!-- 01 方向信号 ------------------------------------------------------ -->
-  <section class="card span-12" style="--i:0" aria-labelledby="signalTitle">
+  <section class="card span-12" style="--i:0" data-page="dashboard" aria-labelledby="signalTitle">
     <header class="card-head">
       <h2 class="card-title" id="signalTitle"><span class="idx">01</span>方向信号<span class="card-sub">T+1 · 最新</span></h2>
       <div class="card-meta">
@@ -137,7 +146,7 @@
   </section>
 
   <!-- 02 回测 ---------------------------------------------------------- -->
-  <section class="card span-12" style="--i:1" aria-labelledby="btTitle">
+  <section class="card span-12" style="--i:1" data-page="backtest" aria-labelledby="btTitle">
     <header class="card-head">
       <h2 class="card-title" id="btTitle"><span class="idx">02</span>回测 · walk-forward<span class="card-sub">方向口径 / 交易口径</span></h2>
       <div class="card-meta">
@@ -209,7 +218,7 @@
   </section>
 
   <!-- 03 模拟盘净值 ---------------------------------------------------- -->
-  <section class="card span-7" style="--i:2" aria-labelledby="eqTitle">
+  <section class="card span-7" style="--i:2" data-page="paper" aria-labelledby="eqTitle">
     <header class="card-head">
       <h2 class="card-title" id="eqTitle"><span class="idx">03</span>模拟盘净值<span class="card-sub">paper · 非实盘</span></h2>
       <div class="card-meta"><span data-bind="eq.meta">—</span></div>
@@ -224,7 +233,7 @@
   </section>
 
   <!-- 04 账户 ---------------------------------------------------------- -->
-  <section class="card span-5" style="--i:3" aria-labelledby="paperTitle">
+  <section class="card span-5" style="--i:3" data-page="paper" aria-labelledby="paperTitle">
     <header class="card-head">
       <h2 class="card-title" id="paperTitle"><span class="idx">04</span>账户<span class="card-sub">模拟盘快照</span></h2>
       <div class="card-meta"><span data-bind="paper.meta">—</span></div>
@@ -276,7 +285,7 @@
   </section>
 
   <!-- 05 最近订单 ------------------------------------------------------ -->
-  <section class="card span-12" style="--i:4" aria-labelledby="ordersTitle">
+  <section class="card span-12" style="--i:4" data-page="paper" aria-labelledby="ordersTitle">
     <header class="card-head">
       <h2 class="card-title" id="ordersTitle"><span class="idx">05</span>最近订单<span class="card-sub">order log</span></h2>
       <div class="card-meta"><span data-bind="orders.meta">—</span></div>
@@ -302,7 +311,7 @@
   </section>
 
   <!-- 06 最近信号 ------------------------------------------------------ -->
-  <section class="card span-12" style="--i:5" aria-labelledby="signalsTitle">
+  <section class="card span-12" style="--i:5" data-page="dashboard" aria-labelledby="signalsTitle">
     <header class="card-head">
       <h2 class="card-title" id="signalsTitle"><span class="idx">06</span>最近信号<span class="card-sub">signal log</span></h2>
       <div class="card-meta">
@@ -392,6 +401,8 @@
 <div class="sr-only" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
 <noscript><div class="noscript">本看板需要启用 JavaScript 才能加载数据。</div></noscript>
 
-<script src="app.js?v=20261124b" defer></script>
+<nav class="tab-bar" id="tabBar" aria-label="页面导航"></nav>
+
+<script src="app.js?v=20261126a" defer></script>
 </body>
 </html>
