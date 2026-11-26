@@ -41,7 +41,7 @@
     { id: "backtest", label: "策略回测", sub: "净值 · 指标 · 基准对比" },
     { id: "paper", label: "模拟交易", sub: "账户 · 持仓 · 订单 · 净值" },
     { id: "data", label: "数据管理", sub: "数据源 · 覆盖 · 更新状态" },
-    { id: "settings", label: "系统设置", sub: "主题 · 刷新 · 关于" }
+    { id: "settings", label: "系统设置", sub: "数据源 · 刷新 · 关于" }
   ];
   var PAGE_MAP = {};
   PAGES.forEach(function (p) { PAGE_MAP[p.id] = p; });
@@ -132,12 +132,153 @@
       '<div class="ph-block"><h3>当前数据源</h3><p>云端：东财 → 腾讯 → 新浪多源兜底；本地：AKShare → 新浪 → Baostock 三级兜底；iFinD 官方 API 审批中。</p></div>' +
       '<div class="ph-block"><h3>待接入</h3><p>数据源健康检查 / K 线覆盖统计 / 更新记录需 /api/data-status 接口后展示。</p></div>' +
       "</div>");
-    placeholderPage("settings", "系统设置",
-      '<div class="ph-grid">' +
-      '<div class="ph-block"><h3>关于</h3><p>个人量化研究平台 · 数据来自公开接口 · 研究用途，不构成投资建议。</p></div>' +
-      '<div class="ph-block"><h3>数据与隐私</h3><p>不采集个人数据；模拟盘为模拟撮合，不连接券商、不保存交易密钥。</p></div>' +
-      '<div class="ph-block"><h3>更新方式</h3><p>盘中数据由 Cloudflare Worker Cron 自动更新；模型与回测由每日任务生成。</p></div>' +
-      "</div>");
+  }
+
+  /* ============================== 系统设置 · 数据源 ============================== */
+  function createSettingsPage() {
+    if (document.getElementById("ph-settings")) return;
+    var main = $("#main");
+    if (!main) return;
+    var sec = document.createElement("section");
+    sec.className = "card span-12 page-placeholder settings-page";
+    sec.id = "ph-settings";
+    sec.setAttribute("data-page", "settings");
+    sec.innerHTML =
+      '<header class="card-head"><div><p class="eyebrow">系统设置</p><h2>行情数据源与偏好</h2></div>' +
+      '<div class="card-meta"><span class="tag" id="dsTag">数据源 · 云端</span></div></header>' +
+      '<div class="ph-body">' +
+        '<div class="ph-block ds-block">' +
+          '<h3>行情数据源</h3>' +
+          '<p class="muted ds-desc">默认使用云端接口。填入本地数据服务地址（本机 <code>127.0.0.1:8899</code> 或 cloudflared 隧道地址）后，' +
+            '指数条 / 今日分时 / 板块等行情请求改走本地秒级源；信号、K 线、回测、模拟盘仍走云端。本地不可用时自动回退云端。</p>' +
+          '<div class="ds-form">' +
+            '<label class="ds-label" for="dsLocalBase">本地服务地址</label>' +
+            '<div class="ds-row">' +
+              '<input id="dsLocalBase" class="ds-input" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://xxx.trycloudflare.com 或 http://127.0.0.1:8899" />' +
+              '<button class="btn ds-btn" id="dsSave" type="button">保存并启用</button>' +
+              '<button class="btn ghost ds-btn" id="dsTest" type="button">测试连接</button>' +
+              '<button class="btn ghost ds-btn" id="dsClear" type="button">恢复云端</button>' +
+            '</div>' +
+            '<p class="ds-hint" id="dsHint">未配置：使用云端接口（Cloudflare）。</p>' +
+            '<p class="ds-status" id="dsStatus" hidden></p>' +
+          '</div>' +
+          '<p class="ds-foot muted">本地服务：<code>python -m quant.local_server --port 8899</code> · 公网隧道：<code>bash scripts/tunnel.sh</code>（详见 docs/LOCAL_SERVER.md）。地址只保存在本机浏览器 localStorage。</p>' +
+        '</div>' +
+        '<div class="ph-block"><h3>关于</h3><p>个人量化研究平台 · 数据来自公开接口 · 研究用途，不构成投资建议。</p></div>' +
+        '<div class="ph-block"><h3>数据与隐私</h3><p>不采集个人数据；模拟盘为模拟撮合，不连接券商、不保存交易密钥。</p></div>' +
+        '<div class="ph-block"><h3>更新方式</h3><p>盘中数据由 Cloudflare Worker Cron 自动更新；模型与回测由每日任务生成；配置本地数据源后可获得秒级行情。</p></div>' +
+      '</div>';
+    main.insertBefore(sec, main.firstChild);
+    bindDataSourceSettings();
+    refreshDataSourceUi();
+  }
+
+  function setDataSourceStatus(text, kind) {
+    var el = $("#dsStatus");
+    if (!el) return;
+    el.hidden = !text;
+    el.textContent = text || "";
+    el.className = "ds-status" + (kind ? " is-" + kind : "");
+  }
+
+  function refreshDataSourceUi() {
+    var input = $("#dsLocalBase");
+    var hint = $("#dsHint");
+    var tag = $("#dsTag");
+    var base = apiBase();
+    if (input && !input.dataset.dirty) input.value = base;
+    if (hint) {
+      hint.textContent = base
+        ? "已启用本地行情：" + base + "（行情类请求走本地，失败自动回退云端）"
+        : "未配置：使用云端接口（Cloudflare）。";
+    }
+    if (tag) {
+      tag.textContent = base ? "数据源 · 本地优先" : "数据源 · 云端";
+      tag.className = "tag" + (base ? " tag-local" : "");
+    }
+    if (B["foot.mode"]) {
+      setText(B["foot.mode"], (IS_CLOUD ? "CLOUDFLARE PAGES" : "LOCAL") + (base ? " + LOCAL QUOTE" : ""));
+    }
+  }
+
+  function restartQuotePoll() {
+    if (directPoll.timer) {
+      window.clearInterval(directPoll.timer);
+      directPoll.timer = null;
+    }
+    if (IS_CLOUD || localBaseActive()) startDirectQuotePoll();
+  }
+
+  function applyDataSource(raw) {
+    var base = normalizeApiBase(raw);
+    if (base === null) return { ok: false, message: "地址需以 http:// 或 https:// 开头（或留空恢复云端）" };
+    try {
+      if (base) window.localStorage.setItem(API_BASE_KEY, base);
+      else window.localStorage.removeItem(API_BASE_KEY);
+    } catch (e) {
+      return { ok: false, message: "浏览器禁用了 localStorage，无法保存数据源配置" };
+    }
+    refreshDataSourceUi();
+    restartQuotePoll();
+    state.market = null;
+    state.marketUpdatedAt = null;
+    state.todayBootstrapped = false;
+    sparkCache = {};
+    state.intraday.cache.clear();
+    state.intraday.data = null;
+    state.localBoards = null;
+    void loadMarket();
+    void loadLocalBoards();
+    void loadIntraday(state.intraday.code, { force: true });
+    return { ok: true };
+  }
+
+  function testDataSource(raw) {
+    var base = normalizeApiBase(raw);
+    if (!base) {
+      setDataSourceStatus("先填写本地服务地址（如 https://xxx.trycloudflare.com）再测试。", "bad");
+      return;
+    }
+    setDataSourceStatus("正在连接 " + base + " …", "pending");
+    var started = Date.now();
+    getJSON(EP.health, { base: base, timeoutMs: 8000 }).then(function (r) {
+      if (r && r.data && r.data.ok) {
+        setDataSourceStatus(
+          "连接成功 · " + (r.data.service || "本地服务") + " v" + (r.data.version || "?") + " · " + (Date.now() - started) + "ms",
+          "ok"
+        );
+      } else if (r && r.error) {
+        setDataSourceStatus("连接失败：" + (r.error.message || "不可达") + "（确认本地服务/隧道已启动）", "bad");
+      } else {
+        setDataSourceStatus("连接失败：返回格式不是本地数据服务（检查地址是否指向 :8899）", "bad");
+      }
+    });
+  }
+
+  function bindDataSourceSettings() {
+    var input = $("#dsLocalBase");
+    var save = $("#dsSave");
+    var test = $("#dsTest");
+    var clear = $("#dsClear");
+    if (!input) return;
+    input.addEventListener("input", function () { input.dataset.dirty = "1"; });
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); if (save) save.click(); }
+    });
+    if (save) save.addEventListener("click", function () {
+      var r = applyDataSource(input.value);
+      input.dataset.dirty = "";
+      refreshDataSourceUi();
+      setDataSourceStatus(r.ok ? "已保存并启用本地行情，正在刷新数据…" : r.message, r.ok ? "ok" : "bad");
+      if (r.ok) testDataSource(input.value);
+    });
+    if (test) test.addEventListener("click", function () { testDataSource(input.value); });
+    if (clear) clear.addEventListener("click", function () {
+      input.value = "";
+      input.dataset.dirty = "";
+      var r = applyDataSource("");
+      setDataSourceStatus(r.ok ? "已恢复云端数据源，正在刷新数据…" : r.message, r.ok ? "ok" : "bad");
+    });
   }
   function createMarketAllPanel() {
     if (document.getElementById("marketAllCard")) return;
@@ -232,6 +373,7 @@
   function initShell() {
     buildNav();
     createPlaceholderPages();
+    createSettingsPage();
     $$("#pageTabs .page-tab, #tabBar .tab-item").forEach(function (el) {
       el.addEventListener("click", function (ev) {
         ev.preventDefault();
@@ -263,8 +405,66 @@
     aiInsight: "/api/ai/insight",
     marketOverview: "/api/market-overview",
     marketAll: "/api/market-all",
-    boardMembers: "/api/board-members"
+    boardMembers: "/api/board-members",
+    quote: "/api/quote",
+    board: "/api/board",
+    health: "/api/health"
   };
+
+  /* ============================== 行情数据源（本地 / 云端） ============================== */
+  /* localStorage.quant_api_base：空 = 全部走云端；填本地服务（:8899 或 trycloudflare 隧道）
+     后，只把「行情类」请求（quote/intraday/market-all/board）改走本地，其余仍走云端。 */
+  var API_BASE_KEY = "quant_api_base";
+  var LOCAL_INDEX_CODES = ["sh000001", "sz399001", "sz399006", "sh000300"];
+
+  function normalizeApiBase(raw) {
+    var text = String(raw == null ? "" : raw).trim();
+    if (!text) return "";
+    if (!/^https?:\/\//i.test(text)) return null;
+    return text.replace(/\/+$/, "");
+  }
+
+  function apiBase() {
+    try {
+      var stored = normalizeApiBase(window.localStorage.getItem(API_BASE_KEY));
+      return stored || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function localBaseActive() { return apiBase() !== ""; }
+
+  /** 把 /api/xxx 拼到 base 上；base 为空/非法时原样返回（走云端）。 */
+  function withApiBase(pathValue, base) {
+    var raw = base === undefined || base === null ? "" : base;
+    var root = normalizeApiBase(raw);
+    var path = String(pathValue || "");
+    if (!root) return path;
+    if (/^https?:\/\//i.test(path)) return path;
+    return root.replace(/\/+$/, "") + (path.charAt(0) === "/" ? path : "/" + path);
+  }
+
+  /** 行情类请求：配置了本地数据源时走本地，否则走云端。 */
+  function marketGet(pathValue, options) {
+    var opts = options || {};
+    var base = apiBase();
+    if (base) opts = Object.assign({}, opts, { base: base });
+    return getJSON(pathValue, opts);
+  }
+
+  /** 今日分时：本地优先，失败自动回退云端（形状一致，normIntradayPayload 通用）。 */
+  function getIntradaySource(code, options) {
+    var url = EP.intraday + "?code=" + encodeURIComponent(code);
+    var opts = options || {};
+    if (!localBaseActive()) return getJSON(url, opts);
+    return marketGet(url, opts).then(function (r) {
+      if (r && r.data && !r.error && !r.challenge && !r.rateLimited) return r;
+      return getJSON(url, opts);
+    }, function () {
+      return getJSON(url, opts);
+    });
+  }
 
   /* 安全必需白名单：Turnstile 官方组件。除此之外页面不加载任何外部资源。 */
   var TURNSTILE_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js";
@@ -520,6 +720,7 @@
   /* ============================== 状态 ============================== */
   var state = {
     mode: MODE,
+    localBoards: null,
     signals: [],
     paper: null,
     equity: [],
@@ -611,7 +812,8 @@
       signal: ctrl.signal
     };
     if (opts.body !== undefined) init.body = opts.body;
-    return fetch(pathValue, init).then(function (res) {
+    var target = withApiBase(pathValue, opts.base);
+    return fetch(target, init).then(function (res) {
       clearTimeout(timer);
       var ct = res.headers.get("content-type") || "";
       if (ct.indexOf("application/json") === -1) return { res: res, data: null };
@@ -2572,7 +2774,7 @@
         var code = canvas.getAttribute("data-code");
         if (!code) return;
         if (sparkCache[code]) { drawSpark(canvas, sparkCache[code]); return; }
-        getJSON(EP.intraday + "?code=" + encodeURIComponent(code), { timeoutMs: 12000 }).then(function (r) {
+        getIntradaySource(code, { timeoutMs: 12000 }).then(function (r) {
           if (!r || r.error || r.challenge || !r.data) return;
           var data = normIntradayPayload(r.data);
           if (!data || !data.points || data.points.length < 2) return;
@@ -2603,7 +2805,7 @@
       html += '<div class="idx-card2 ' + cls + '" data-idx="' + esc(it.code || "") + '" role="button" tabindex="0">' +
         '<div class="idx-c2-top"><span class="idx-name">' + esc(it.name) + '</span><span class="idx-dir2 ' + cls + '">' + dir + '</span></div>' +
         '<b class="idx-c2-price num">' + fmtNum(price) + '</b>' +
-        '<canvas class="idx-spark" data-code="' + (it.code ? ((String(it.code).startsWith("39") ? "sz" : "sh") + it.code) : "") + '" height="34"></canvas>' +
+        '<canvas class="idx-spark" data-code="' + (it.code ? fullIndexCode(it.code) : "") + '" height="34"></canvas>' +
         '<div class="idx-c2-bottom"><span class="num">' + (diff >= 0 ? "+" : "") + fmtNum(diff) + '</span><span class="num">' + (chg > 0 ? "+" : "") + fmtNum(chg) + '%</span></div>' +
       '</div>';
     });
@@ -2613,7 +2815,7 @@
       card.style.cursor = "pointer";
       card.addEventListener("click", function () {
         var code = card.getAttribute("data-idx") || "";
-        var full = code ? ((String(code).startsWith("39") ? "sz" : "sh") + code) : "";
+        var full = code ? fullIndexCode(code) : "";
         if (!full) return;
         if (typeof navigate === "function") navigate("market");
         if (typeof loadKline === "function") void loadKline(full, { auto: false });
@@ -2667,7 +2869,79 @@
     var live = Boolean(snapshot.live) || isTradingSession();
     setText($("#mktUpdated"), (live ? "实时 " : "收盘数据 ") + fmtClock(updatedAt || snapshot.asof));
   }
-  function loadMarket(options) {
+  function sixDigitIndexCode(full) {
+    var text = String(full || "").toLowerCase();
+    return /^(sh|sz)\d{6}$/.test(text) ? text.slice(2) : "";
+  }
+
+  /** 本地 /api/quote → 云端 /api/market 同形状的最小 snapshot（只含指数条所需字段）。 */
+  function snapshotFromLocalQuotes(payload) {
+    var byCode = {};
+    ((payload && payload.items) || []).forEach(function (it) {
+      if (it && it.code) byCode[String(it.code).toLowerCase()] = it;
+    });
+    var indices = [];
+    LOCAL_INDEX_CODES.forEach(function (full) {
+      var it = byCode[full];
+      if (!it) return;
+      var pct = num(it.pct_chg);
+      indices.push({
+        code: sixDigitIndexCode(full),
+        name: it.name || full,
+        price: num(it.price) || 0,
+        pct_chg: isNum(pct) ? pct : 0,
+        amount: num(it.amount) || 0,
+        direction: isNum(pct) && pct > 0 ? "up" : isNum(pct) && pct < 0 ? "down" : "flat"
+      });
+    });
+    var parts = shParts(new Date());
+    return {
+      indices: indices,
+      sentiment: {},
+      activity: {},
+      market_direction: {},
+      live: isTradingSession(),
+      trade_date: parts ? parts.y + "-" + parts.m + "-" + parts.d : "",
+      asof: (payload && payload.updated_at) || ""
+    };
+  }
+
+  function loadMarketLocal(options) {
+    return marketGet(EP.quote + "?codes=" + LOCAL_INDEX_CODES.join(","), { timeoutMs: 8000 }).then(function (r) {
+      if (!r || r.error || r.challenge || r.rateLimited || !r.data || !r.data.items || !r.data.items.length) {
+        return null;
+      }
+      var localSnap = snapshotFromLocalQuotes(r.data);
+      var updatedAt = r.data.updated_at || "";
+      // 指数价用本地秒级源，情绪/涨跌家数用云端快照补齐（云端失败不影响指数条）
+      return getJSON(EP.market).then(function (cloud) {
+        if (cloud && cloud.data && cloud.data.snapshot) {
+          var merged = Object.assign({}, cloud.data.snapshot);
+          merged.indices = localSnap.indices;
+          merged.live = localSnap.live || Boolean(merged.live);
+          if (!merged.trade_date) merged.trade_date = localSnap.trade_date;
+          return { snap: merged, updatedAt: updatedAt || cloud.data.updated_at };
+        }
+        return { snap: localSnap, updatedAt: updatedAt };
+      }, function () {
+        return { snap: localSnap, updatedAt: updatedAt };
+      });
+    }).then(function (out) {
+      if (!out) return { kind: "empty" };
+      state.market = out.snap;
+      state.marketUpdatedAt = out.updatedAt;
+      renderMarket(state.market, state.marketUpdatedAt);
+      void loadLocalBoards();
+      if (!state.todayBootstrapped) {
+        state.todayBootstrapped = true;
+        void loadIntraday(state.intraday.code, { force: true });
+        void loadMarketHistory();
+      }
+      return { kind: "ok" };
+    });
+  }
+
+  function loadMarketCloud(options) {
     var opts = options || {};
     return getJSON(EP.market).then(function (r) {
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
@@ -2682,6 +2956,44 @@
         void loadMarketHistory();
       }
       return { kind: state.market ? "ok" : "empty" };
+    });
+  }
+
+  var localBoardsLoading = null;
+
+  /** 本地 /api/board → 市场全景板块榜兜底（云端 regime 快照缺失时使用；无资金流字段显示为—）。 */
+  function loadLocalBoards() {
+    if (!localBaseActive()) {
+      state.localBoards = null;
+      return Promise.resolve([]);
+    }
+    if (state.localBoards && state.localBoards.length) return Promise.resolve(state.localBoards);
+    if (localBoardsLoading) return localBoardsLoading;
+    localBoardsLoading = marketGet(EP.board + "?limit=10&sort=pct_chg", { timeoutMs: 8000 }).then(function (r) {
+      var items = (r && r.data && r.data.items) || [];
+      state.localBoards = items.map(function (it) {
+        return { name: it.name, kind: "industry", pct_1d: it.pct_chg, pct_5d: null, net_inflow: null };
+      });
+      renderPanorama();
+      return state.localBoards;
+    }).catch(function () {
+      state.localBoards = null;
+      return [];
+    }).then(function (value) {
+      localBoardsLoading = null;
+      return value;
+    });
+    return localBoardsLoading;
+  }
+
+  function loadMarket(options) {
+    if (!localBaseActive()) return loadMarketCloud(options);
+    // 本地数据源优先；本地不可用（服务/隧道挂了）自动回退云端
+    return loadMarketLocal(options).then(function (res) {
+      if (res && res.kind === "ok") return res;
+      return loadMarketCloud(options);
+    }, function () {
+      return loadMarketCloud(options);
     });
   }
 
@@ -3303,7 +3615,7 @@
       return Promise.resolve({ kind: "ok" });
     }
     var reqId = ++state.intraday.req;
-    return getJSON(EP.intraday + "?code=" + encodeURIComponent(target)).then(function (r) {
+    return getIntradaySource(target).then(function (r) {
       if (reqId !== state.intraday.req) return { kind: "stale" };
       if (r.challenge) { noteChallenge(); return { kind: "challenge" }; }
       if (r.rateLimited) { startRateLimit(r.retryAfter); return { kind: "ratelimit" }; }
@@ -3607,6 +3919,7 @@
     ensurePanoramaSections();
     renderPanoramaDist();
     var leaders = (state.regime && state.regime.leaders) || [];
+    if (!leaders.length && state.localBoards && state.localBoards.length) leaders = state.localBoards;
     var top = leaders.slice(0, 10);
     var box = $("#panoLeaders");
     if (box) {
@@ -3858,11 +4171,33 @@
       state.marketAllFailedAt = 0;
       return stocks;
     }).catch(function () {
-      // 失败不永久缓存：30s 后允许重试（避免网络抖动导致整个会话表格/联想都是空）
-      state.marketAll = null;
-      state.marketAllFailedAt = Date.now();
-      return [];
+      // 云端快照失败时：若配置了本地数据源，用本地分页接口拉首屏 100 只兜底
+      if (!localBaseActive()) return [];
+      return marketGet(EP.marketAll + "?page=1&num=100", { timeoutMs: 12000 }).then(function (lr) {
+        var items = lr && lr.data && Array.isArray(lr.data.items) ? lr.data.items : [];
+        return items.map(function (it) {
+          return {
+            symbol: it.symbol,
+            code: it.code,
+            name: it.name,
+            price: it.price,
+            pct_chg: it.pct_chg,
+            amount: it.amount,
+            turnover: it.turnover
+          };
+        });
+      }).catch(function () {
+        return [];
+      });
     }).then(function (value) {
+      if (value && value.length) {
+        state.marketAll = value;
+        state.marketAllFailedAt = 0;
+      } else {
+        // 失败不永久缓存：30s 后允许重试（避免网络抖动导致整个会话表格/联想都是空）
+        state.marketAll = null;
+        state.marketAllFailedAt = Date.now();
+      }
       state.marketAllLoading = null;
       return value;
     });
@@ -5935,6 +6270,132 @@
     });
   }
 
+  /* ===== 行情轮询：本地数据源优先，其次浏览器直连腾讯（CORS 开放，3 秒级，easyquotation 同款思路） ===== */
+  var directPoll = { timer: null };
+
+  function parseTencentQuotes(text) {
+    var out = {};
+    String(text).split("\n").forEach(function (line) {
+      if (!line || line.indexOf("=") < 0) return;
+      var key = line.split("=")[0].split("_").pop();
+      var raw = line.split("=").slice(1).join("=").replace(/^"/, "").replace(/";?$/, "");
+      var f = raw.split("~");
+      if (f.length < 6) return;
+      var price = Number(f[3]);
+      var prev = Number(f[4]);
+      if (!Number.isFinite(price) || price <= 0) return;
+      out[key] = {
+        name: f[1],
+        price: price,
+        pct: prev ? (price / prev - 1) * 100 : 0,
+        amount: f[37] ? Number(f[37]) * 10000 : 0
+      };
+    });
+    return out;
+  }
+
+  /** 六位指数代码 → 带交易所前缀（000001=sh，39xxxx=sz，000300=sh）。 */
+  function fullIndexCode(code) {
+    var text = String(code || "").trim().toLowerCase();
+    if (/^(sh|sz|bj)\d{6}$/.test(text)) return text;
+    if (!/^\d{6}$/.test(text)) return "";
+    return text.slice(0, 2) === "39" ? "sz" + text : "sh" + text;
+  }
+
+  /** 本地 /api/quote 响应 → 与直连腾讯同形状的 {code: {name, price, pct, amount}}。 */
+  function parseLocalQuotePayload(payload) {
+    var out = {};
+    var items = (payload && payload.items) || [];
+    items.forEach(function (it) {
+      if (!it || !it.code) return;
+      var price = num(it.price);
+      if (!isNum(price) || price <= 0) return;
+      var pct = num(it.pct_chg);
+      out[String(it.code).toLowerCase()] = {
+        name: it.name,
+        price: price,
+        pct: isNum(pct) ? pct : 0,
+        amount: num(it.amount) || 0
+      };
+    });
+    return out;
+  }
+
+  function fetchTencentDirect(codes) {
+    var url = "https://qt.gtimg.cn/q=" + codes.join(",") + "&_=" + Date.now();
+    return fetch(url, { cache: "no-store", credentials: "omit", referrer: "https://gu.qq.com/" })
+      .then(function (resp) { return resp.arrayBuffer(); })
+      .then(function (buf) {
+        var text;
+        try { text = new TextDecoder("gbk").decode(buf); }
+        catch (e) { text = new TextDecoder("utf-8").decode(buf); }
+        return parseTencentQuotes(text);
+      });
+  }
+
+  function fetchQuoteFeed(codes) {
+    if (!localBaseActive()) return fetchTencentDirect(codes);
+    return marketGet(EP.quote + "?codes=" + codes.join(","), { timeoutMs: 6000 }).then(function (r) {
+      if (!r || !r.data || !r.data.items || !r.data.items.length) throw new Error("local quote unavailable");
+      return parseLocalQuotePayload(r.data);
+    }, function (err) {
+      throw err;
+    });
+  }
+
+  function applyDirectQuotes(quotes) {
+    document.querySelectorAll(".rt-idx[data-code]").forEach(function (el) {
+      var full = fullIndexCode(el.getAttribute("data-code"));
+      var q = full ? quotes[full] : null;
+      if (!q) return;
+      var cls = q.pct > 0 ? "up" : (q.pct < 0 ? "down" : "flat");
+      var priceEl = el.querySelector("[data-price]");
+      var chgEl = el.querySelector(".rt-idx-chg");
+      if (priceEl) { priceEl.textContent = fmtNum(q.price); priceEl.className = "rt-idx-price num " + cls; }
+      if (chgEl) { chgEl.textContent = (q.pct > 0 ? "+" : "") + fmtNum(q.pct) + "%"; chgEl.className = "rt-idx-chg num " + cls; }
+      el.classList.remove("up", "down", "flat");
+      el.classList.add(cls);
+    });
+    document.querySelectorAll(".idx-card2[data-idx]").forEach(function (card) {
+      var full = fullIndexCode(card.getAttribute("data-idx"));
+      var q = full ? quotes[full] : null;
+      if (!q) return;
+      var cls = q.pct > 0 ? "up" : (q.pct < 0 ? "down" : "flat");
+      var px = card.querySelector(".idx-c2-price");
+      if (px) px.textContent = fmtNum(q.price);
+      var bot = card.querySelector(".idx-c2-bottom");
+      if (bot && bot.children.length >= 2) {
+        var prev = 1 + q.pct / 100 !== 0 ? q.price / (1 + q.pct / 100) : q.price;
+        var diff = q.price - prev;
+        bot.children[0].textContent = (diff >= 0 ? "+" : "") + fmtNum(diff);
+        bot.children[1].textContent = (q.pct > 0 ? "+" : "") + fmtNum(q.pct) + "%";
+      }
+      card.className = "idx-card2 " + cls;
+    });
+  }
+
+  function startDirectQuotePoll() {
+    if (!directPoll) directPoll = { timer: null };
+    if (directPoll.timer) return;
+    var tick = function () {
+      if (document.hidden) return;
+      try {
+        var codes = [];
+        $$(".rt-idx[data-code], .idx-card2[data-idx]").forEach(function (el) {
+          var full = fullIndexCode(el.getAttribute("data-code") || el.getAttribute("data-idx"));
+          if (full && codes.indexOf(full) < 0) codes.push(full);
+        });
+        if (!codes.length) return;
+        fetchQuoteFeed(codes).then(applyDirectQuotes).catch(function () {});
+      } catch (e) { /* 行情轮询失败静默，页面继续用快照数据 */ }
+    };
+    tick();
+    directPoll.timer = window.setInterval(tick, 3000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) tick();
+    });
+  }
+
   /* ============================== 启动 ============================== */
   function init() {
     collectDom();
@@ -5976,7 +6437,8 @@
     startRealtime();
     initShell();
     if (IS_CLOUD && typeof createMarketAllPanel === "function") { setTimeout(createMarketAllPanel, 800); }
-    if (IS_CLOUD) startDirectQuotePoll();
+    // 云端常开 3s 轮询；配置了本地数据源时也开启（指数条 3 秒刷新走本地/直连）
+    restartQuotePoll();
   }
 
   /** 桌面/手机统一优先级：市场整体 → K线 → 大盘状态 → 事件 → 其余面板。 */
@@ -5998,99 +6460,3 @@
     init();
   }
 })();
-
-  /* ===== 浏览器直连腾讯行情（CORS 开放，3 秒级刷新，社区 easyquotation 同款思路） ===== */
-  var directPoll = { timer: null };
-
-  function parseTencentQuotes(text) {
-    var out = {};
-    String(text).split("\n").forEach(function (line) {
-      if (!line || line.indexOf("=") < 0) return;
-      var key = line.split("=")[0].split("_").pop();
-      var raw = line.split("=").slice(1).join("=").replace(/^"/, "").replace(/";?$/, "");
-      var f = raw.split("~");
-      if (f.length < 6) return;
-      var price = Number(f[3]);
-      var prev = Number(f[4]);
-      if (!Number.isFinite(price) || price <= 0) return;
-      out[key] = {
-        name: f[1],
-        price: price,
-        pct: prev ? (price / prev - 1) * 100 : 0,
-        amount: f[37] ? Number(f[37]) * 10000 : 0
-      };
-    });
-    return out;
-  }
-
-  function fetchTencentDirect(codes) {
-    var url = "https://qt.gtimg.cn/q=" + codes.join(",") + "&_=" + Date.now();
-    return fetch(url, { cache: "no-store", credentials: "omit", referrer: "https://gu.qq.com/" })
-      .then(function (resp) { return resp.arrayBuffer(); })
-      .then(function (buf) {
-        var text;
-        try { text = new TextDecoder("gbk").decode(buf); }
-        catch (e) { text = new TextDecoder("utf-8").decode(buf); }
-        return parseTencentQuotes(text);
-      });
-  }
-
-  function applyDirectQuotes(quotes) {
-    document.querySelectorAll(".rt-idx[data-code]").forEach(function (el) {
-      var q = quotes[el.getAttribute("data-code")];
-      if (!q) return;
-      var cls = q.pct > 0 ? "up" : (q.pct < 0 ? "down" : "flat");
-      var priceEl = el.querySelector("[data-price]");
-      var chgEl = el.querySelector(".rt-idx-chg");
-      if (priceEl) { priceEl.textContent = fmtNum(q.price); priceEl.className = "rt-idx-price num " + cls; }
-      if (chgEl) { chgEl.textContent = (q.pct > 0 ? "+" : "") + fmtNum(q.pct) + "%"; chgEl.className = "rt-idx-chg num " + cls; }
-      el.classList.remove("up", "down", "flat");
-      el.classList.add(cls);
-    });
-    document.querySelectorAll(".idx-card2[data-idx]").forEach(function (card) {
-      var code = String(card.getAttribute("data-idx") || "");
-      if (!code) return;
-      var full = (code.startsWith("39") ? "sz" : "sh") + code;
-      var q = quotes[full];
-      if (!q) return;
-      var cls = q.pct > 0 ? "up" : (q.pct < 0 ? "down" : "flat");
-      var px = card.querySelector(".idx-c2-price");
-      if (px) px.textContent = fmtNum(q.price);
-      var bot = card.querySelector(".idx-c2-bottom");
-      if (bot && bot.children.length >= 2) {
-        var prev = 1 + q.pct / 100 !== 0 ? q.price / (1 + q.pct / 100) : q.price;
-        var diff = q.price - prev;
-        bot.children[0].textContent = (diff >= 0 ? "+" : "") + fmtNum(diff);
-        bot.children[1].textContent = (q.pct > 0 ? "+" : "") + fmtNum(q.pct) + "%";
-      }
-      card.className = "idx-card2 " + cls;
-    });
-  }
-
-  function startDirectQuotePoll() {
-    if (!directPoll) directPoll = { timer: null };
-    if (directPoll.timer) return;
-    var tick = function () {
-      if (document.hidden) return;
-      try {
-      var codes = [];
-      document.querySelectorAll(".rt-idx[data-code]").forEach(function (el) {
-        var c = el.getAttribute("data-code");
-        if (c && codes.indexOf(c) < 0) codes.push(c);
-      });
-      document.querySelectorAll(".idx-card2[data-idx]").forEach(function (el) {
-        var code = String(el.getAttribute("data-idx") || "");
-        if (!code) return;
-        var full = (code.startsWith("39") ? "sz" : "sh") + code;
-        if (codes.indexOf(full) < 0) codes.push(full);
-      });
-      if (!codes.length) return;
-      fetchTencentDirect(codes).then(applyDirectQuotes).catch(function () {});
-      } catch (e) { /* 直连失败静默，页面继续用快照数据 */ }
-    };
-    tick();
-    directPoll.timer = window.setInterval(tick, 3000);
-    document.addEventListener("visibilitychange", function () {
-      if (!document.hidden) tick();
-    });
-  }
