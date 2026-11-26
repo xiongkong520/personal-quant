@@ -1673,3 +1673,23 @@ dialog::backdrop { background: rgba(5, 7, 11, 0.68); }
   .idx-amt { display: none; }
   .idx-px { font-size: 14px; }
 }
+
+/* ============================== 指数卡片（同花顺风格） ============================== */
+.mkt-indices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.idx-card2 { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-1); min-width: 0; }
+.idx-card2.up { background: linear-gradient(160deg, rgba(224, 46, 61, 0.10), var(--bg-1) 62%); border-color: rgba(224, 46, 61, 0.28); }
+.idx-card2.down { background: linear-gradient(160deg, rgba(8, 153, 129, 0.10), var(--bg-1) 62%); border-color: rgba(8, 153, 129, 0.28); }
+.idx-c2-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.idx-name { font-size: 11.5px; color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.idx-dir2 { font-size: 10px; color: var(--text-2); flex: none; }
+.idx-dir2.up { color: var(--up); } .idx-dir2.down { color: var(--down); }
+.idx-c2-price { font-size: 19px; font-weight: 650; letter-spacing: 0.01em; color: var(--text-0); line-height: 1.25; }
+.idx-card2.up .idx-c2-price { color: var(--up); }
+.idx-card2.down .idx-c2-price { color: var(--down); }
+.idx-c2-bottom { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.idx-card2.up .idx-c2-bottom { color: var(--up); }
+.idx-card2.down .idx-c2-bottom { color: var(--down); }
+.idx-card2.flat .idx-c2-bottom { color: var(--text-1); }
+@media (min-width: 720px) {
+  .mkt-indices { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}

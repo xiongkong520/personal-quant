@@ -6,6 +6,8 @@
 <meta name="color-scheme" content="dark" />
 <meta name="theme-color" content="#0B0E13" />
 <meta name="robots" content="noindex, nofollow" />
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#0b0f14" />
 <title>个人量化工作台 · 本地看板</title>
 <link rel="stylesheet" href="styles.css?v=20261126a" />
 <script>window.QT_MODE = "local";</script>
@@ -404,5 +406,12 @@
 <nav class="tab-bar" id="tabBar" aria-label="页面导航"></nav>
 
 <script src="app.js?v=20261126a" defer></script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("/sw.js").catch(function () {});
+    });
+  }
+</script>
 </body>
 </html>

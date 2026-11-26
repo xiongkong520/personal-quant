@@ -1,0 +1,26 @@
+{
+  "name": "个人量化研究平台",
+  "short_name": "量化工作台",
+  "description": "A股行情·情绪·板块·信号·AI复盘研究平台（研究用途，不构成投资建议）",
+  "start_url": "/?pwa=1",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

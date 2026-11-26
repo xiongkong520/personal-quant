@@ -2428,16 +2428,15 @@
     var html = "";
     snapshot.indices.forEach(function (it) {
       var chg = Number(it.pct_chg || 0);
+      var price = Number(it.price || 0);
       var cls = chg > 0 ? "up" : (chg < 0 ? "down" : "flat");
       var dir = it.direction === "up" ? "偏多" : (it.direction === "down" ? "偏空" : "震荡");
-      var amount = Number(it.amount || 0);
-      var amtText = amount > 0 ? (amount >= 1e12 ? (amount / 1e12).toFixed(2) + "万亿" : (amount / 1e8).toFixed(0) + "亿") : "";
-      html += '<div class="idx-row">' +
-        '<span class="idx-name">' + esc(it.name) + '</span>' +
-        (amtText ? '<span class="idx-amt num muted">' + amtText + '</span>' : "") +
-        '<b class="idx-px num ' + cls + '">' + fmtNum(it.price) + '</b>' +
-        '<span class="idx-chg num ' + cls + '">' + (chg > 0 ? "+" : "") + fmtNum(chg) + '%</span>' +
-        '<span class="idx-dir ' + cls + '">' + dir + '</span>' +
+      var prev = chg !== 0 && 1 + chg / 100 !== 0 ? price / (1 + chg / 100) : price;
+      var diff = price - prev;
+      html += '<div class="idx-card2 ' + cls + '">' +
+        '<div class="idx-c2-top"><span class="idx-name">' + esc(it.name) + '</span><span class="idx-dir2 ' + cls + '">' + dir + '</span></div>' +
+        '<b class="idx-c2-price num">' + fmtNum(price) + '</b>' +
+        '<div class="idx-c2-bottom"><span class="num">' + (diff >= 0 ? "+" : "") + fmtNum(diff) + '</span><span class="num">' + (chg > 0 ? "+" : "") + fmtNum(chg) + '%</span></div>' +
       '</div>';
     });
     box.innerHTML = html;
