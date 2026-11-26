@@ -10,7 +10,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "personal_quant"
-database_id = "00000000-0000-0000-0000-000000000000" # 占位符：部署前替换为 `wrangler d1 create` 返回的 id（或用本地 wrangler.local.toml）
+database_id = "b236f430-bf64-4b11-9ac8-829744a654b2" # personal_quant（2026-11-21 创建，WNAM）
 migrations_dir = "migrations"
 
 # 静态看板（Pages 产物）由 Worker 的 Assets 绑定提供：
@@ -26,10 +26,10 @@ enabled = false
 port = 8788
 local_protocol = "http"
 
-# 公开配置（非密钥）。部署时填 Turnstile 真实 sitekey（或用本地 wrangler.local.toml）。
-# secret 一律用 wrangler secret put，不写在这里。
-# [vars]
-# TURNSTILE_SITEKEY = "0x4AAAAAAA..."
+# 公开配置（非密钥）。真实 Turnstile sitekey（2026-11-21 创建，域名 personal-quant-worker.xiongkong520.workers.dev）
+[vars]
+TURNSTILE_SITEKEY = "0x4AAAAAAGLKrUEtVV-vcN0y"
+WORKER_PUBLIC_URL = "https://quant-board-9y2.pages.dev"
 
 # 生产限流建议绑定 KV（本地 --local 不需要，会自动用内存 Map）：
 #   npx wrangler kv namespace create RATE_LIMIT_KV
@@ -38,3 +38,9 @@ local_protocol = "http"
 # [[kv_namespaces]]
 # binding = "RATE_LIMIT_KV"
 # id = "<namespace id>"
+
+# 盘中实时刷新（Cron 由 Cloudflare 触发，不依赖设备）
+# */3：每 3 分钟预热 /api/market-overview 与 /api/market 的 60s 缓存
+#      没有它时每个冷请求都要现抓 5 指数 + 宽度 + 板块（10~20 秒），前端 12 秒超时直接空白
+[triggers]
+crons = ["*/3 * * * *", "*/5 1-7 * * 1-5", "35 3 * * 1-5", "5 7 * * 1-5", "40 7 * * 1-5"]

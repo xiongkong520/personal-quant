@@ -5621,6 +5621,7 @@
     });
     startRealtime();
     initShell();
+    if (IS_CLOUD) startDirectQuotePoll();
   }
 
   /** 桌面/手机统一优先级：市场整体 → K线 → 大盘状态 → 事件 → 其余面板。 */
@@ -5642,3 +5643,91 @@
     init();
   }
 })();
+
+  /* ===== 浏览器直连腾讯行情（CORS 开放，3 秒级刷新，社区 easyquotation 同款思路） ===== */
+  var directPoll = { timer: null };
+
+  function parseTencentQuotes(text) {
+    var out = {};
+    String(text).split("\n").forEach(function (line) {
+      if (!line || line.indexOf("=") < 0) return;
+      var key = line.split("=")[0].split("_").pop();
+      var raw = line.split("=").slice(1).join("=").replace(/^"/, "").replace(/";?$/, "");
+      var f = raw.split("~");
+      if (f.length < 6) return;
+      var price = Number(f[3]);
+      var prev = Number(f[4]);
+      if (!Number.isFinite(price) || price <= 0) return;
+      out[key] = {
+        name: f[1],
+        price: price,
+        pct: prev ? (price / prev - 1) * 100 : 0,
+        amount: f[37] ? Number(f[37]) * 10000 : 0
+      };
+    });
+    return out;
+  }
+
+  function fetchTencentDirect(codes) {
+    var url = "https://qt.gtimg.cn/q=" + codes.join(",") + "&_=" + Date.now();
+    return fetch(url, { cache: "no-store", credentials: "omit", referrer: "https://gu.qq.com/" })
+      .then(function (resp) { return resp.arrayBuffer(); })
+      .then(function (buf) { return parseTencentQuotes(new TextDecoder("gbk").decode(buf)); });
+  }
+
+  function applyDirectQuotes(quotes) {
+    document.querySelectorAll(".rt-idx[data-code]").forEach(function (el) {
+      var q = quotes[el.getAttribute("data-code")];
+      if (!q) return;
+      var cls = q.pct > 0 ? "up" : (q.pct < 0 ? "down" : "flat");
+      var priceEl = el.querySelector("[data-price]");
+      var chgEl = el.querySelector(".rt-idx-chg");
+      if (priceEl) { priceEl.textContent = fmtNum(q.price); priceEl.className = "rt-idx-price num " + cls; }
+      if (chgEl) { chgEl.textContent = (q.pct > 0 ? "+" : "") + fmtNum(q.pct) + "%"; chgEl.className = "rt-idx-chg num " + cls; }
+      el.classList.remove("up", "down", "flat");
+      el.classList.add(cls);
+    });
+    document.querySelectorAll(".idx-card2[data-idx]").forEach(function (card) {
+      var code = String(card.getAttribute("data-idx") || "");
+      if (!code) return;
+      var full = (code.startsWith("39") ? "sz" : "sh") + code;
+      var q = quotes[full];
+      if (!q) return;
+      var cls = q.pct > 0 ? "up" : (q.pct < 0 ? "down" : "flat");
+      var px = card.querySelector(".idx-c2-price");
+      if (px) px.textContent = fmtNum(q.price);
+      var bot = card.querySelector(".idx-c2-bottom");
+      if (bot && bot.children.length >= 2) {
+        var prev = 1 + q.pct / 100 !== 0 ? q.price / (1 + q.pct / 100) : q.price;
+        var diff = q.price - prev;
+        bot.children[0].textContent = (diff >= 0 ? "+" : "") + fmtNum(diff);
+        bot.children[1].textContent = (q.pct > 0 ? "+" : "") + fmtNum(q.pct) + "%";
+      }
+      card.className = "idx-card2 " + cls;
+    });
+  }
+
+  function startDirectQuotePoll() {
+    if (directPoll.timer) return;
+    var tick = function () {
+      if (document.hidden) return;
+      var codes = [];
+      document.querySelectorAll(".rt-idx[data-code]").forEach(function (el) {
+        var c = el.getAttribute("data-code");
+        if (c && codes.indexOf(c) < 0) codes.push(c);
+      });
+      document.querySelectorAll(".idx-card2[data-idx]").forEach(function (el) {
+        var code = String(el.getAttribute("data-idx") || "");
+        if (!code) return;
+        var full = (code.startsWith("39") ? "sz" : "sh") + code;
+        if (codes.indexOf(full) < 0) codes.push(full);
+      });
+      if (!codes.length) return;
+      fetchTencentDirect(codes).then(applyDirectQuotes).catch(function () {});
+    };
+    tick();
+    directPoll.timer = window.setInterval(tick, 3000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) tick();
+    });
+  }

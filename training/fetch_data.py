@@ -386,84 +386,96 @@ def fetch_baostock_stock_daily(symbol: str, start: str, end: str, retries: int) 
     return frame.reset_index(drop=True)
 
 
-def fetch_stock_daily(symbol: str, start: str, end: str, retries: int = 2, sleep: float = 0.45) -> pd.DataFrame:
-    """个股日线：AKShare 首选，失败自动切 Baostock；两者都失败抛 DataSourceError。"""
+def fetch_stock_daily(
+    symbol: str, start: str, end: str, retries: int = 2, sleep: float = 0.45, source: str = "auto"
+) -> pd.DataFrame:
+    """个股日线：AKShare 首选，失败自动切 Baostock；两者都失败抛 DataSourceError。
+
+    ``source``：``auto``（默认，两级降级）| ``akshare`` | ``baostock``。
+    大批量股票池建议 ``--source baostock``：东财接口对同一 IP 限流很狠，反复失败会拖慢整批。
+    """
     errors: list[str] = []
-    # 1) AKShare（社区主流首选）
-    try:
-        frame = fetch_akshare_stock_daily(symbol, start, end, retries)
-        if len(frame) > 0:
-            LOGGER.info("fetch %s <- akshare rows=%d", symbol, len(frame))
-            time.sleep(sleep)
-            return frame
-        errors.append("akshare: empty")
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"akshare: {exc}")
-        LOGGER.warning("AKShare %s 失败，切换 Baostock：%s", symbol, exc)
-    # 2) Baostock（社区稳定免费兜底）
-    try:
-        frame = fetch_baostock_stock_daily(symbol, start, end, retries)
-        if len(frame) > 0:
-            LOGGER.info("fetch %s <- baostock rows=%d", symbol, len(frame))
-            time.sleep(sleep)
-            return frame
-        errors.append("baostock: empty")
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"baostock: {exc}")
-        LOGGER.warning("Baostock %s 也失败：%s", symbol, exc)
+    if source in ("auto", "akshare"):
+        try:
+            frame = fetch_akshare_stock_daily(symbol, start, end, retries)
+            if len(frame) > 0:
+                LOGGER.info("fetch %s <- akshare rows=%d", symbol, len(frame))
+                time.sleep(sleep)
+                return frame
+            errors.append("akshare: empty")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"akshare: {exc}")
+            LOGGER.warning("AKShare %s 失败，切换 Baostock：%s", symbol, exc)
+    if source in ("auto", "baostock"):
+        try:
+            frame = fetch_baostock_stock_daily(symbol, start, end, retries)
+            if len(frame) > 0:
+                LOGGER.info("fetch %s <- baostock rows=%d", symbol, len(frame))
+                time.sleep(sleep)
+                return frame
+            errors.append("baostock: empty")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"baostock: {exc}")
+            LOGGER.warning("Baostock %s 也失败：%s", symbol, exc)
     raise DataSourceError(f"{symbol} 所有数据源失败：{errors}")
 
 
-def fetch_index_daily(code: str, start: str, end: str, retries: int = 2, sleep: float = 0.45) -> pd.DataFrame:
+def fetch_index_daily(
+    code: str, start: str, end: str, retries: int = 2, sleep: float = 0.45, source: str = "auto"
+) -> pd.DataFrame:
     """指数日线：AKShare 首选 → Baostock 兜底；都失败返回空表（训练降级为股票池等权基准）。"""
     errors: list[str] = []
-    try:
-        fn = _akshare_index_hist()
-        raw = retry_call(
-            lambda: fn(symbol=str(code).zfill(6), period="daily",
-                       start_date=_compact(start), end_date=_compact(end)),
-            retries=retries, label=f"akshare/index{code}",
-        )
-        frame = ingest_index(raw, code, "akshare")
-        frame = frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= end)]
-        if len(frame) > 0:
-            LOGGER.info("index %s <- akshare rows=%d", code, len(frame))
-            time.sleep(sleep)
-            return frame.reset_index(drop=True)
-        errors.append("akshare: empty")
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"akshare: {exc}")
-        LOGGER.warning("AKShare 指数 %s 失败，切换 Baostock：%s", code, exc)
-
-    try:
-        _bs_login()
-        fields = "date,open,high,low,close,volume,amount"
-
-        def query() -> pd.DataFrame:
-            rs = _bs().query_history_k_data_plus(
-                bs_index_code(code), fields, start_date=start, end_date=end, frequency="d"
+    if source in ("auto", "akshare"):
+        try:
+            fn = _akshare_index_hist()
+            raw = retry_call(
+                lambda: fn(symbol=str(code).zfill(6), period="daily",
+                           start_date=_compact(start), end_date=_compact(end)),
+                retries=retries, label=f"akshare/index{code}",
             )
-            if getattr(rs, "error_code", "0") != "0":
-                raise RuntimeError(f"Baostock 指数查询失败 {code}：{getattr(rs, 'error_msg', '')}")
-            rows: list[list[str]] = []
-            while rs.next():
-                rows.append(rs.get_row_data())
-            return pd.DataFrame(rows, columns=rs.fields)
+            frame = ingest_index(raw, code, "akshare")
+            frame = frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= end)]
+            if len(frame) > 0:
+                LOGGER.info("index %s <- akshare rows=%d", code, len(frame))
+                time.sleep(sleep)
+                return frame.reset_index(drop=True)
+            errors.append("akshare: empty")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"akshare: {exc}")
+            LOGGER.warning("AKShare 指数 %s 失败，切换 Baostock：%s", code, exc)
 
-        raw = retry_call(query, retries=retries, label=f"baostock/index{code}")
-        frame = ingest_index(raw, code, "baostock")
-        frame = frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= end)]
-        if len(frame) > 0:
-            LOGGER.info("index %s <- baostock rows=%d", code, len(frame))
-            time.sleep(sleep)
-            return frame.reset_index(drop=True)
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"baostock: {exc}")
+    if source in ("auto", "baostock"):
+        try:
+            _bs_login()
+            fields = "date,open,high,low,close,volume,amount"
+
+            def query() -> pd.DataFrame:
+                rs = _bs().query_history_k_data_plus(
+                    bs_index_code(code), fields, start_date=start, end_date=end, frequency="d"
+                )
+                if getattr(rs, "error_code", "0") != "0":
+                    raise RuntimeError(f"Baostock 指数查询失败 {code}：{getattr(rs, 'error_msg', '')}")
+                rows: list[list[str]] = []
+                while rs.next():
+                    rows.append(rs.get_row_data())
+                return pd.DataFrame(rows, columns=rs.fields)
+
+            raw = retry_call(query, retries=retries, label=f"baostock/index{code}")
+            frame = ingest_index(raw, code, "baostock")
+            frame = frame[(frame["trade_date"] >= start) & (frame["trade_date"] <= end)]
+            if len(frame) > 0:
+                LOGGER.info("index %s <- baostock rows=%d", code, len(frame))
+                time.sleep(sleep)
+                return frame.reset_index(drop=True)
+            errors.append("baostock: empty")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"baostock: {exc}")
     LOGGER.warning("指数 %s 全部数据源失败（训练将使用股票池等权基准）：%s", code, errors)
     return pd.DataFrame(columns=INDEX_COLUMNS)
 
 
 # ---------------------------------------------------------------------------
+
 # 涨跌停池（AKShare 官方接口；历史窗口有限）
 # ---------------------------------------------------------------------------
 def _zt_endpoint(ak: Any, name: str, day: str) -> pd.DataFrame:
@@ -692,6 +704,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--synthetic", action="store_true", help="离线合成数据（不联网）")
     parser.add_argument("--synthetic-days", type=int, default=420, help="--synthetic 生成的交易日数")
     parser.add_argument("--seed", type=int, default=42, help="合成数据随机种子")
+    parser.add_argument(
+        "--source", choices=["auto", "akshare", "baostock"], default="auto",
+        help="数据源策略：auto=AKShare 优先/失败降级；大股票池建议 baostock（东财易限流）",
+    )
     parser.add_argument("--verbose", action="store_true", help="输出调试日志")
     return parser.parse_args(argv)
 
@@ -724,7 +740,9 @@ def main(argv: list[str] | None = None) -> int:
         frames: list[pd.DataFrame] = []
         for i, symbol in enumerate(symbols, 1):
             try:
-                frame = fetch_stock_daily(symbol, start, end, retries=args.retries, sleep=args.sleep)
+                frame = fetch_stock_daily(
+                    symbol, start, end, retries=args.retries, sleep=args.sleep, source=args.source
+                )
                 frames.append(frame)
                 summary.setdefault("symbols_ok", []).append(symbol)
             except Exception as exc:  # noqa: BLE001 - 单票失败不中断整体
@@ -746,7 +764,9 @@ def main(argv: list[str] | None = None) -> int:
         index_frames: list[pd.DataFrame] = []
         if not args.skip_index:
             for code in (BENCHMARK_INDEX, *MARKET_INDEX_CODES):
-                frame = fetch_index_daily(code, start, end, retries=args.retries, sleep=args.sleep)
+                frame = fetch_index_daily(
+                    code, start, end, retries=args.retries, sleep=args.sleep, source=args.source
+                )
                 if len(frame) > 0:
                     index_frames.append(frame)
                 time.sleep(args.sleep)
