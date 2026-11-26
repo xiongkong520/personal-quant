@@ -2509,7 +2509,7 @@
       html += '<div class="idx-card2 ' + cls + '">' +
         '<div class="idx-c2-top"><span class="idx-name">' + esc(it.name) + '</span><span class="idx-dir2 ' + cls + '">' + dir + '</span></div>' +
         '<b class="idx-c2-price num">' + fmtNum(price) + '</b>' +
-        '<canvas class="idx-spark" data-code="' + (it.code ? "sh" + it.code : "") + '" height="34"></canvas>' +
+        '<canvas class="idx-spark" data-code="' + (it.code ? ((String(it.code).startsWith("39") ? "sz" : "sh") + it.code) : "") + '" height="34"></canvas>' +
         '<div class="idx-c2-bottom"><span class="num">' + (diff >= 0 ? "+" : "") + fmtNum(diff) + '</span><span class="num">' + (chg > 0 ? "+" : "") + fmtNum(chg) + '%</span></div>' +
       '</div>';
     });
