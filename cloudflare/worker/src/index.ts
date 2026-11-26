@@ -481,7 +481,8 @@ async function handleStock(request: Request, env: Env, url: URL): Promise<Respon
   const guard = await requireChallenge(request, env);
   if (guard) return guard;
   if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const symbol = (url.searchParams.get("symbol") ?? "").trim();
+  const rawSymbol = (url.searchParams.get("symbol") ?? "").trim().toLowerCase();
+  const symbol = rawSymbol.replace(/^(sh|sz|bj)/, "");
   if (!/^\d{6}$/.test(symbol)) return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码");
   const { items } = await querySignalLog(env.DB, { symbols: [symbol], latest: true, limit: 1 });
   const name = (await queryStockName(env.DB, symbol)) ?? "";
@@ -810,7 +811,7 @@ async function handleIntraday(url: URL): Promise<Response> {
 async function klineHandler(url: URL): Promise<Response> {
   const symbol = (url.searchParams.get("symbol") ?? "").trim();
   if (!/^(\d{6}|(sh|sz|bj)\d{6})$/.test(symbol)) {
-    return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码或 sh/sz+6 位指数代码");
+    return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码，或 sh/sz/bj+6 位代码");
   }
   const limitRaw = Number(url.searchParams.get("limit") ?? url.searchParams.get("days") ?? "120");
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 250) : 120;

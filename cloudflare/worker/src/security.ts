@@ -27,7 +27,7 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   "content-security-policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com https://qt.gtimg.cn https://web.ifzq.gtimg.cn https://*.gtimg.cn https://hq.sinajs.cn https://*.sina.com.cn; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   "x-frame-options": "DENY",
   "referrer-policy": "strict-origin-when-cross-origin",
   "x-content-type-options": "nosniff",

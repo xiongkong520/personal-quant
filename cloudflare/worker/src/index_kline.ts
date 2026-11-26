@@ -56,8 +56,11 @@ function secidOf(symbol: string): string | null {
   if (/^sz\d{6}$/.test(symbol)) return `0.${symbol.slice(2)}`;
   if (/^bj\d{6}$/.test(symbol)) return `0.${symbol.slice(2)}`;
   if (/^\d{6}$/.test(symbol)) {
-    // 东财 secid：6/9 开头为沪市，其余深市/北交所
-    return symbol.startsWith("6") || symbol.startsWith("9") ? `1.${symbol}` : `0.${symbol}`;
+    // 东财 secid 市场号：1=沪市，0=深市/北交所。
+    // 北交所：92xxxx（新代码）、8xxxxx、4xxxxx -> 0.xxxxxx（注意 920xxx 不能按 9 开头归沪市）
+    if (symbol.startsWith("92") || symbol.startsWith("8") || symbol.startsWith("4")) return `0.${symbol}`;
+    if (symbol.startsWith("6") || symbol.startsWith("5") || symbol.startsWith("9")) return `1.${symbol}`;
+    return `0.${symbol}`;
   }
   return null;
 }
@@ -121,13 +124,21 @@ async function fetchKlineRaw(symbol: string, fqt: number): Promise<IndexKlineIte
   }
 }
 
+/** 6 位代码 -> 腾讯/新浪行情代码（北交所 92/8/4 开头为 bj，沪市 6/5/9 为 sh，其余 sz）。 */
+function marketPrefixedCode(symbol: string): string {
+  if (/^(sh|sz|bj)\d{6}$/i.test(symbol)) return symbol.toLowerCase();
+  if (symbol.startsWith("92") || symbol.startsWith("8") || symbol.startsWith("4")) return `bj${symbol}`;
+  if (symbol.startsWith("6") || symbol.startsWith("5") || symbol.startsWith("9")) return `sh${symbol}`;
+  return `sz${symbol}`;
+}
+
 /** 新浪日 K 兜底（展示用途；东财/腾讯对 Worker 出口不可达时使用）。 */
 async function fetchSinaKline(symbol: string, limit: number, fqt: number): Promise<IndexKlineItem[] | null> {
   let code: string;
   if (/^(sh|sz|bj)\d{6}$/i.test(symbol)) {
     code = symbol.toLowerCase();
   } else if (/^\d{6}$/.test(symbol)) {
-    code = `${symbol.startsWith("6") || symbol.startsWith("9") ? "sh" : "sz"}${symbol}`;
+    code = marketPrefixedCode(symbol);
   } else {
     return null;
   }
@@ -190,7 +201,7 @@ async function fetchTencentKline(symbol: string, limit: number, fqt: number): Pr
   if (/^(sh|sz|bj)\d{6}$/i.test(symbol)) {
     code = symbol.toLowerCase();
   } else if (/^\d{6}$/.test(symbol)) {
-    code = `${symbol.startsWith("6") || symbol.startsWith("9") ? "sh" : "sz"}${symbol}`;
+    code = marketPrefixedCode(symbol);
   } else {
     return null;
   }

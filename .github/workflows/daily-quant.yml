@@ -59,6 +59,11 @@ jobs:
           git config user.name "quant-bot"
           git config user.email "quant-bot@users.noreply.github.com"
 
+      - name: 刷新板块成分股快照（新浪行业）
+        continue-on-error: true
+        run: python scripts/build_board_members.py
+        timeout-minutes: 5
+
       - name: 训练 LightGBM（社区数据源：AKShare 主 + Baostock 兜底）
         continue-on-error: true
         run: |
