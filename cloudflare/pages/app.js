@@ -2506,7 +2506,7 @@
       var dir = it.direction === "up" ? "偏多" : (it.direction === "down" ? "偏空" : "震荡");
       var prev = chg !== 0 && 1 + chg / 100 !== 0 ? price / (1 + chg / 100) : price;
       var diff = price - prev;
-      html += '<div class="idx-card2 ' + cls + '">' +
+      html += '<div class="idx-card2 ' + cls + '" data-idx="' + esc(it.code || "") + '" role="button" tabindex="0">' +
         '<div class="idx-c2-top"><span class="idx-name">' + esc(it.name) + '</span><span class="idx-dir2 ' + cls + '">' + dir + '</span></div>' +
         '<b class="idx-c2-price num">' + fmtNum(price) + '</b>' +
         '<canvas class="idx-spark" data-code="' + (it.code ? ((String(it.code).startsWith("39") ? "sz" : "sh") + it.code) : "") + '" height="34"></canvas>' +
@@ -2515,6 +2515,20 @@
     });
     box.innerHTML = html;
     void loadIndexSparks();
+    box.querySelectorAll(".idx-card2").forEach(function (card) {
+      card.style.cursor = "pointer";
+      card.addEventListener("click", function () {
+        var code = card.getAttribute("data-idx") || "";
+        var full = code ? ((String(code).startsWith("39") ? "sz" : "sh") + code) : "";
+        if (!full) return;
+        if (typeof navigate === "function") navigate("market");
+        if (typeof loadKline === "function") void loadKline(full, { auto: false });
+        setTimeout(function () {
+          var k = document.getElementById("klineCard");
+          if (k && k.scrollIntoView) k.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 300);
+      });
+    });
     var sent = snapshot.sentiment || {};
     setText($("#mktScore"), fmtNum(sent.score, 1));
     var stateEl = $("#mktState");
