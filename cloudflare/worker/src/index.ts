@@ -1277,6 +1277,36 @@ export default {
       });
 
       // --- 市场全景 / 兼容 / 板块 / 分时 / K线 ---
+      if (path === "/api/snapshot") {
+        return routeWithGuard(["GET"], async () => {
+          const cacheKey = "https://quant-edge-cache.local/api/snapshot";
+          try {
+            const cached = await caches.default.match(cacheKey);
+            if (cached) return applySecurityHeaders(cached);
+          } catch {
+            /* ignore */
+          }
+          try {
+            const resp = await fetch(
+              "https://raw.githubusercontent.com/xiongkong520/personal-quant/main/reports/snapshot.json",
+              { headers: { "user-agent": "quant-worker/1.0" }, signal: AbortSignal.timeout(12000) },
+            );
+            if (!resp.ok) return errorResponse(503, "data_unavailable", "快照暂不可用，请稍后重试");
+            const body = await resp.text();
+            const out = new Response(body, {
+              headers: { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=60" },
+            });
+            try {
+              await caches.default.put(cacheKey, out.clone());
+            } catch {
+              /* ignore */
+            }
+            return applySecurityHeaders(out);
+          } catch {
+            return errorResponse(503, "data_unavailable", "快照暂不可用，请稍后重试");
+          }
+        });
+      }
       if (path === "/api/market-overview") {
         return routeWithGuard(["GET"], async () =>
           cachedRoute(request, env, 60, () => handleMarketOverview(request, env, url), cacheDecorate(60)),

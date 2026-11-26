@@ -633,7 +633,103 @@ const INTRADAY_SECIDS: Record<string, string> = {
 };
 
 /** 指数当日分时（东财 trends2 实时拉取，不写 D1；/api/intraday 用，边缘缓存 30s）。 */
+/** 新浪 5 分钟 K 线 → 分时（对 Worker 出口稳定可达；收盘后也能拿到当日数据）。 */
+async function fetchSinaIntraday(code: string): Promise<IntradayPayload | null> {
+  const url =
+    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData" +
+    `?symbol=${code}&scale=5&ma=no&datalen=60`;
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": BROWSER_UA, Referer: "https://finance.sina.com.cn/" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!resp.ok) return null;
+    const rows = (await resp.json()) as Array<Record<string, unknown>>;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const points: IntradayPayload["points"] = [];
+    let tradeDate = "";
+    let prevClose: number | null = null;
+    let cumAmount = 0;
+    let cumVolume = 0;
+    for (const row of rows) {
+      const day = String(row["day"] ?? "");
+      const close = num(row["close"] ?? row["price"]);
+      const volume = num(row["volume"]) ?? 0;
+      if (!day || close === null) continue;
+      if (!tradeDate) tradeDate = day.slice(0, 10);
+      const time = day.length >= 16 ? day.slice(11, 16) : day.slice(11);
+      cumVolume += volume;
+      cumAmount += close * volume * 100;
+      points.push({
+        time,
+        price: close,
+        avg_price: cumVolume > 0 ? Math.round((cumAmount / cumVolume / 100) * 100) / 100 : null,
+        volume,
+      });
+      if (prevClose === null) prevClose = close;
+    }
+    if (points.length === 0 || !tradeDate) return null;
+    return { code, name: intradayName(code), trade_date: tradeDate, pre_close: prevClose, points };
+  } catch {
+    return null;
+  }
+}
+
+function intradayName(code: string): string {
+  const names: Record<string, string> = {
+    sh000001: "上证指数",
+    sz399001: "深证成指",
+    sz399006: "创业板指",
+    sh000300: "沪深300",
+    sh000688: "科创50",
+    sh000905: "中证500",
+    sh000852: "中证1000",
+  };
+  return names[code] ?? code;
+}
+
+/** 腾讯 minute 分时（社区实测无爬虫限制；当日 242 点 09:30-15:00）。 */
+async function fetchTencentIntraday(code: string): Promise<IntradayPayload | null> {
+  const url = `https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=${code}`;
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": BROWSER_UA, Referer: "https://gu.qq.com/" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as {
+      data?: Record<string, { data?: { data?: string[]; date?: string } }>;
+    };
+    const node = json?.data?.[code];
+    const rows = node?.data?.data ?? [];
+    const rawDate = String(node?.data?.date ?? "");
+    if (rows.length === 0 || rawDate.length < 8) return null;
+    const tradeDate = `${rawDate.slice(0, 4)}-${rawDate.slice(4, 6)}-${rawDate.slice(6, 8)}`;
+    const points: IntradayPayload["points"] = [];
+    for (const line of rows) {
+      const parts = String(line).trim().split(/\s+/);
+      if (parts.length < 2) continue;
+      const rawTime = parts[0];
+      const time = rawTime.length === 4 ? `${rawTime.slice(0, 2)}:${rawTime.slice(2, 4)}` : rawTime;
+      const price = num(parts[1]);
+      if (price === null) continue;
+      points.push({ time, price, avg_price: null, volume: num(parts[2]) ?? 0 });
+    }
+    if (points.length === 0) return null;
+    return { code, name: intradayName(code), trade_date: tradeDate, pre_close: null, points };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchIntradayData(code: string): Promise<IntradayPayload | null> {
+  // 1) 腾讯 minute（社区实测无爬虫限制，当日全量分时）
+  const tencent = await fetchTencentIntraday(code);
+  if (tencent) return tencent;
+  // 2) 新浪 5 分钟 K 线兜底
+  const sina = await fetchSinaIntraday(code);
+  if (sina) return sina;
+  // 3) 东财 trends2 兜底
   const secid = INTRADAY_SECIDS[code];
   if (!secid) return null;
   const params = new URLSearchParams({
