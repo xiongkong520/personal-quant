@@ -1,0 +1,641 @@
+{
+  "schema": 1,
+  "model_version": "lgbm-2026-11-26",
+  "model_file": "latest_model.json",
+  "feature_order": [
+    "ret_1d",
+    "ret_5d",
+    "ret_20d",
+    "excess_ret_5d",
+    "excess_ret_10d",
+    "excess_ret_20d",
+    "amount_share",
+    "amount_share_ma5",
+    "turnover_rate",
+    "upper_shadow",
+    "lower_shadow",
+    "body_ratio",
+    "amplitude",
+    "gap",
+    "ma_bias_5",
+    "ma_bias_20",
+    "ma_bias_60",
+    "volatility_5",
+    "volatility_20",
+    "limit_up_count_lag1",
+    "limit_down_count_lag1",
+    "broken_rate_lag1",
+    "max_consecutive_boards_lag1",
+    "limit_up_ma5_lag1",
+    "broken_rate_ma5_lag1",
+    "sentiment_missing",
+    "pool_limit_up_count_lag1",
+    "pool_broken_rate_lag1",
+    "pool_max_boards_lag1",
+    "bench_ret_5d_lag1"
+  ],
+  "features": [
+    {
+      "name": "ret_1d",
+      "index": 0,
+      "dtype": "float",
+      "group": "个股动量",
+      "formula": "close[t]/close[t-1]-1"
+    },
+    {
+      "name": "ret_5d",
+      "index": 1,
+      "dtype": "float",
+      "group": "个股动量",
+      "formula": "close[t]/close[t-5]-1"
+    },
+    {
+      "name": "ret_20d",
+      "index": 2,
+      "dtype": "float",
+      "group": "个股动量",
+      "formula": "close[t]/close[t-20]-1"
+    },
+    {
+      "name": "excess_ret_5d",
+      "index": 3,
+      "dtype": "float",
+      "group": "超额收益",
+      "formula": "ret_5d - bench_ret_5d[t]（bench=沪深300，缺失时股票池等权）"
+    },
+    {
+      "name": "excess_ret_10d",
+      "index": 4,
+      "dtype": "float",
+      "group": "超额收益",
+      "formula": "ret_10d - bench_ret_10d[t]"
+    },
+    {
+      "name": "excess_ret_20d",
+      "index": 5,
+      "dtype": "float",
+      "group": "超额收益",
+      "formula": "ret_20d - bench_ret_20d[t]"
+    },
+    {
+      "name": "amount_share",
+      "index": 6,
+      "dtype": "float",
+      "group": "量能",
+      "formula": "amount[t] / market_amount[t]（全市场成交额=上证+深证；缺失时股票池合计）"
+    },
+    {
+      "name": "amount_share_ma5",
+      "index": 7,
+      "dtype": "float",
+      "group": "量能",
+      "formula": "amount_share 的 5 日均值"
+    },
+    {
+      "name": "turnover_rate",
+      "index": 8,
+      "dtype": "float",
+      "group": "量能",
+      "formula": "换手率(%)（数据源提供；缺失填 0）"
+    },
+    {
+      "name": "upper_shadow",
+      "index": 9,
+      "dtype": "float",
+      "group": "K线形态",
+      "formula": "(high[t]-max(open[t],close[t]))/pre_close[t]"
+    },
+    {
+      "name": "lower_shadow",
+      "index": 10,
+      "dtype": "float",
+      "group": "K线形态",
+      "formula": "(min(open[t],close[t])-low[t])/pre_close[t]"
+    },
+    {
+      "name": "body_ratio",
+      "index": 11,
+      "dtype": "float",
+      "group": "K线形态",
+      "formula": "(close[t]-open[t])/pre_close[t]"
+    },
+    {
+      "name": "amplitude",
+      "index": 12,
+      "dtype": "float",
+      "group": "K线形态",
+      "formula": "(high[t]-low[t])/pre_close[t]"
+    },
+    {
+      "name": "gap",
+      "index": 13,
+      "dtype": "float",
+      "group": "K线形态",
+      "formula": "open[t]/pre_close[t]-1"
+    },
+    {
+      "name": "ma_bias_5",
+      "index": 14,
+      "dtype": "float",
+      "group": "均线乖离",
+      "formula": "close[t]/MA5[t]-1"
+    },
+    {
+      "name": "ma_bias_20",
+      "index": 15,
+      "dtype": "float",
+      "group": "均线乖离",
+      "formula": "close[t]/MA20[t]-1"
+    },
+    {
+      "name": "ma_bias_60",
+      "index": 16,
+      "dtype": "float",
+      "group": "均线乖离",
+      "formula": "close[t]/MA60[t]-1"
+    },
+    {
+      "name": "volatility_5",
+      "index": 17,
+      "dtype": "float",
+      "group": "波动率",
+      "formula": "std(ret_1d, 5)"
+    },
+    {
+      "name": "volatility_20",
+      "index": 18,
+      "dtype": "float",
+      "group": "波动率",
+      "formula": "std(ret_1d, 20)"
+    },
+    {
+      "name": "limit_up_count_lag1",
+      "index": 19,
+      "dtype": "float",
+      "group": "涨跌停情绪",
+      "formula": "全市场涨停家数[t-1]（AKShare 涨跌停池，缺失=0）"
+    },
+    {
+      "name": "limit_down_count_lag1",
+      "index": 20,
+      "dtype": "float",
+      "group": "涨跌停情绪",
+      "formula": "全市场跌停家数[t-1]"
+    },
+    {
+      "name": "broken_rate_lag1",
+      "index": 21,
+      "dtype": "float",
+      "group": "涨跌停情绪",
+      "formula": "炸板率[t-1]=炸板数/(炸板数+涨停数)"
+    },
+    {
+      "name": "max_consecutive_boards_lag1",
+      "index": 22,
+      "dtype": "float",
+      "group": "涨跌停情绪",
+      "formula": "最高连板数[t-1]"
+    },
+    {
+      "name": "limit_up_ma5_lag1",
+      "index": 23,
+      "dtype": "float",
+      "group": "涨跌停情绪",
+      "formula": "涨停家数 5 日均值[t-1]"
+    },
+    {
+      "name": "broken_rate_ma5_lag1",
+      "index": 24,
+      "dtype": "float",
+      "group": "涨跌停情绪",
+      "formula": "炸板率 5 日均值[t-1]"
+    },
+    {
+      "name": "sentiment_missing",
+      "index": 25,
+      "dtype": "float",
+      "group": "涨跌停情绪",
+      "formula": "该日之前涨跌停池数据是否缺失（1=缺失，用 0 填充）"
+    },
+    {
+      "name": "pool_limit_up_count_lag1",
+      "index": 26,
+      "dtype": "float",
+      "group": "股票池代理情绪",
+      "formula": "股票池内收盘涨停家数[t-1]（历史代理，按板块涨跌停价判断）"
+    },
+    {
+      "name": "pool_broken_rate_lag1",
+      "index": 27,
+      "dtype": "float",
+      "group": "股票池代理情绪",
+      "formula": "股票池内触板未封比例[t-1]"
+    },
+    {
+      "name": "pool_max_boards_lag1",
+      "index": 28,
+      "dtype": "float",
+      "group": "股票池代理情绪",
+      "formula": "股票池内最高连板高度[t-1]"
+    },
+    {
+      "name": "bench_ret_5d_lag1",
+      "index": 29,
+      "dtype": "float",
+      "group": "市场基准",
+      "formula": "基准 5 日收益[t-1]"
+    }
+  ],
+  "winsorize": {
+    "lower": 0.01,
+    "upper": 0.99,
+    "values_lower": [
+      -0.04043899,
+      -0.08666947,
+      -0.14863009,
+      -0.07691308,
+      -0.10552887,
+      -0.13957494,
+      0.00033424,
+      0.00034727,
+      0.145756,
+      0.0,
+      0.0,
+      -0.03713741,
+      0.006123,
+      -0.02,
+      -0.04251022,
+      -0.08856002,
+      -0.16903566,
+      0.00224152,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      -0.05242054
+    ],
+    "values_upper": [
+      0.05659069,
+      0.13740604,
+      0.32531987,
+      0.10044226,
+      0.14735697,
+      0.21373246,
+      0.00963706,
+      0.00831739,
+      2.643416,
+      0.02568657,
+      0.02246434,
+      0.04889044,
+      0.07164928,
+      0.02833097,
+      0.06176268,
+      0.15830627,
+      0.28277037,
+      0.04995746,
+      0.04374027,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.07050517
+    ],
+    "applied": false,
+    "note": "LightGBM 树对单调变换不敏感，训练未做缩尾/标准化；此处供展示与未来预处理参考"
+  },
+  "normalize": {
+    "mean": [
+      0.00048624,
+      0.0026637,
+      0.01072059,
+      0.00111802,
+      0.00216697,
+      0.00378156,
+      0.00257061,
+      0.00257008,
+      0.68926168,
+      0.00594048,
+      0.00475962,
+      0.00070176,
+      0.02169487,
+      -0.00021553,
+      0.00077158,
+      0.0039722,
+      0.00952265,
+      0.01453913,
+      0.01574919,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.00713267,
+      0.0021398,
+      0.00713267,
+      0.00157631
+    ],
+    "std": [
+      0.01781062,
+      0.04217664,
+      0.08225356,
+      0.03380467,
+      0.04845978,
+      0.06971993,
+      0.00188858,
+      0.00170182,
+      0.53846325,
+      0.00563755,
+      0.00494706,
+      0.01582467,
+      0.01332178,
+      0.00880457,
+      0.01979652,
+      0.04495654,
+      0.07727398,
+      0.00992713,
+      0.00808642,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      0.08415339,
+      0.04217331,
+      0.08415339,
+      0.0273546
+    ],
+    "applied": false,
+    "note": "树模型推理不需要标准化；Worker 按 feature_order 原始值遍历即可"
+  },
+  "label": {
+    "horizon": 1,
+    "definition": "r = close[t+1]/open[t+1]-1（次日开盘买、收盘卖）；r > 0.200% → up；r < -0.200% → down；否则 flat",
+    "classes": [
+      "up",
+      "flat",
+      "down"
+    ]
+  },
+  "benchmark": {
+    "code": "000300",
+    "excess_return_fallback": "股票池等权"
+  },
+  "inference": {
+    "feature_missing_policy": "缺失特征填 0（与训练 fillna(0) 同口径）",
+    "tree_encoding": "child>=0 → 内部节点下标；child<0 → 叶子，leaf_idx = -child-1",
+    "class_order": [
+      "up",
+      "flat",
+      "down"
+    ],
+    "raw_score": "raw[class_index] += tree(x)",
+    "probability": "softmax(raw)"
+  },
+  "feature_importance": [
+    {
+      "name": "bench_ret_5d_lag1",
+      "gain": 2580.4356,
+      "gain_share": 0.11329,
+      "split": 487,
+      "group": "市场基准"
+    },
+    {
+      "name": "volatility_20",
+      "gain": 1547.7291,
+      "gain_share": 0.067951,
+      "split": 267,
+      "group": "波动率"
+    },
+    {
+      "name": "gap",
+      "gain": 1352.8773,
+      "gain_share": 0.059396,
+      "split": 303,
+      "group": "K线形态"
+    },
+    {
+      "name": "excess_ret_5d",
+      "gain": 1312.2575,
+      "gain_share": 0.057613,
+      "split": 290,
+      "group": "超额收益"
+    },
+    {
+      "name": "upper_shadow",
+      "gain": 1271.163,
+      "gain_share": 0.055808,
+      "split": 280,
+      "group": "K线形态"
+    },
+    {
+      "name": "turnover_rate",
+      "gain": 1255.963,
+      "gain_share": 0.055141,
+      "split": 294,
+      "group": "量能"
+    },
+    {
+      "name": "ma_bias_60",
+      "gain": 1247.7606,
+      "gain_share": 0.054781,
+      "split": 284,
+      "group": "均线乖离"
+    },
+    {
+      "name": "excess_ret_10d",
+      "gain": 1182.3602,
+      "gain_share": 0.05191,
+      "split": 268,
+      "group": "超额收益"
+    },
+    {
+      "name": "lower_shadow",
+      "gain": 1173.9473,
+      "gain_share": 0.05154,
+      "split": 260,
+      "group": "K线形态"
+    },
+    {
+      "name": "ret_5d",
+      "gain": 1123.4617,
+      "gain_share": 0.049324,
+      "split": 257,
+      "group": "个股动量"
+    },
+    {
+      "name": "ma_bias_5",
+      "gain": 1006.0601,
+      "gain_share": 0.04417,
+      "split": 234,
+      "group": "均线乖离"
+    },
+    {
+      "name": "ret_1d",
+      "gain": 938.6814,
+      "gain_share": 0.041211,
+      "split": 214,
+      "group": "个股动量"
+    },
+    {
+      "name": "ma_bias_20",
+      "gain": 926.0141,
+      "gain_share": 0.040655,
+      "split": 224,
+      "group": "均线乖离"
+    },
+    {
+      "name": "excess_ret_20d",
+      "gain": 916.8672,
+      "gain_share": 0.040254,
+      "split": 217,
+      "group": "超额收益"
+    },
+    {
+      "name": "volatility_5",
+      "gain": 891.402,
+      "gain_share": 0.039136,
+      "split": 224,
+      "group": "波动率"
+    },
+    {
+      "name": "amplitude",
+      "gain": 853.9043,
+      "gain_share": 0.037489,
+      "split": 192,
+      "group": "K线形态"
+    },
+    {
+      "name": "amount_share",
+      "gain": 845.8406,
+      "gain_share": 0.037135,
+      "split": 193,
+      "group": "量能"
+    },
+    {
+      "name": "amount_share_ma5",
+      "gain": 831.3332,
+      "gain_share": 0.036498,
+      "split": 197,
+      "group": "量能"
+    },
+    {
+      "name": "body_ratio",
+      "gain": 804.8628,
+      "gain_share": 0.035336,
+      "split": 192,
+      "group": "K线形态"
+    },
+    {
+      "name": "ret_20d",
+      "gain": 714.3179,
+      "gain_share": 0.031361,
+      "split": 163,
+      "group": "个股动量"
+    },
+    {
+      "name": "limit_up_count_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "pool_max_boards_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "股票池代理情绪"
+    },
+    {
+      "name": "broken_rate_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "max_consecutive_boards_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "limit_up_ma5_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "broken_rate_ma5_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "sentiment_missing",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "pool_limit_up_count_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "股票池代理情绪"
+    },
+    {
+      "name": "pool_broken_rate_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "股票池代理情绪"
+    },
+    {
+      "name": "limit_down_count_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    }
+  ],
+  "data": {
+    "benchmark": "000300",
+    "market_amount_source": "sh+sz_index",
+    "label_definition": "r = close[t+1]/open[t+1]-1（次日开盘买、收盘卖）；r > 0.200% → up；r < -0.200% → down；否则 flat",
+    "label_cost": 0.002,
+    "n_rows": 5616,
+    "n_symbols": 8,
+    "date_range": [
+      "2024-01-02",
+      "2026-11-26"
+    ],
+    "n_dates": 702,
+    "label_dist": {
+      "down": 2474,
+      "up": 2315,
+      "flat": 819
+    }
+  }
+}

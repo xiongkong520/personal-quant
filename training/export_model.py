@@ -372,10 +372,12 @@ def validate_model_json(model: dict) -> list[str]:
     if not trees:
         errors.append("trees 为空")
     for t_idx, tree in enumerate(trees):
-        for key in ("split_feature", "threshold", "left_child", "right_child", "decision_type"):
-            if key not in tree:
-                errors.append(f"trees[{t_idx}] 缺少 {key}")
-        if errors:
+        missing_keys = [
+            key for key in ("split_feature", "threshold", "left_child", "right_child", "decision_type")
+            if key not in tree
+        ]
+        if missing_keys:
+            errors.append(f"trees[{t_idx}] 缺少 {missing_keys}")
             continue
         n_internal = len(tree["split_feature"])
         if n_internal == 0:
@@ -390,29 +392,33 @@ def validate_model_json(model: dict) -> list[str]:
             continue
         if int(tree.get("class_index", -1)) not in (0, 1, 2):
             errors.append(f"trees[{t_idx}].class_index 非法: {tree.get('class_index')!r}")
+        child_valid = True
         for key in ("left_child", "right_child"):
             for child in tree[key]:
                 if child >= 0:
                     if child >= n_internal:
                         errors.append(f"trees[{t_idx}].{key} 内部节点下标越界: {child}")
+                        child_valid = False
                 elif -child - 1 >= n_leaves:
                     errors.append(f"trees[{t_idx}].{key} 叶子下标越界: {child}")
+                    child_valid = False
         for dtype in tree["decision_type"]:
             if dtype not in ("<=", "==", "<", ">"):
                 errors.append(f"trees[{t_idx}].decision_type 非法: {dtype!r}")
-        # 根节点可达性 & 全部节点被引用（无孤立节点）
-        referenced = set()
-        stack = [0]
-        while stack:
-            node = stack.pop()
-            if node < 0:
-                continue
-            if node in referenced and node != 0:
-                continue
-            referenced.add(node)
-            stack.extend([tree["left_child"][node], tree["right_child"][node]])
-        if len(referenced) != n_internal:
-            errors.append(f"trees[{t_idx}] 存在不可达内部节点: {n_internal - len(referenced)} 个")
+        # 根节点可达性 & 全部节点被引用（无孤立节点）；child 已越界时跳过
+        if child_valid:
+            referenced = set()
+            stack = [0]
+            while stack:
+                node = stack.pop()
+                if node < 0:
+                    continue
+                if node in referenced and node != 0:
+                    continue
+                referenced.add(node)
+                stack.extend([tree["left_child"][node], tree["right_child"][node]])
+            if len(referenced) != n_internal:
+                errors.append(f"trees[{t_idx}] 存在不可达内部节点: {n_internal - len(referenced)} 个")
     metrics = model.get("metrics") or {}
     walk = metrics.get("walk_forward") or {}
     for key in ("accuracy", "win_rate", "logloss", "n"):

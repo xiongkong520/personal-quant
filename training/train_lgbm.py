@@ -271,6 +271,9 @@ def _pool_sentiment_frame(daily: pd.DataFrame) -> pd.DataFrame:
     """股票池代理情绪（历史全量可用）：收盘涨停/跌停家数、触板未封率、最高连板。"""
     frame = daily.copy()
     frame["symbol"] = frame["symbol"].astype(str)
+    # pre_close 缺失（每票首行）用当日 close 兜底，避免 NaN 进入涨跌停价计算
+    pre_close = pd.to_numeric(frame["pre_close"], errors="coerce")
+    frame["pre_close"] = pre_close.where(pre_close > 0, pd.to_numeric(frame["close"], errors="coerce"))
     pct = frame["symbol"].map(limit_pct_for)
     limit_up_price = np.array([_round_half_up(p * (1 + r), 2) for p, r in zip(frame["pre_close"], pct)])
     limit_down_price = np.array([_round_half_up(p * (1 - r), 2) for p, r in zip(frame["pre_close"], pct)])
@@ -331,6 +334,8 @@ def _symbol_features(group: pd.DataFrame) -> pd.DataFrame:
     out["volatility_20"] = ret.rolling(20, min_periods=10).std(ddof=1)
     out["turnover_rate"] = turnover
     out["_amount"] = amount
+    out["_open"] = open_
+    out["_close"] = close
     return out
 
 
@@ -405,8 +410,8 @@ def build_training_dataset(
 
     # 标签：T+1 可成交收益（次日开盘买、收盘卖），扣除双边摩擦后三分类
     feats = feats.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
-    next_open = feats.groupby("symbol")["open"].shift(-1)
-    next_close = feats.groupby("symbol")["close"].shift(-1)
+    next_open = feats.groupby("symbol")["_open"].shift(-1)
+    next_close = feats.groupby("symbol")["_close"].shift(-1)
     feats["label_ret"] = next_close / next_open - 1.0
     feats["label"] = np.where(
         feats["label_ret"] > label_cost, "up",

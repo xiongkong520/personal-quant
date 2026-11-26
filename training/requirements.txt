@@ -1,0 +1,9 @@
+# 零成本训练管道依赖（Kaggle/Colab/Actions 通用）
+# 数据源：AKShare 首选 + Baostock 兜底（社区主流组合，均为免费数据源）
+# 训练：LightGBM（CPU 即可；PyPI wheel 为 CPU 版，无需 GPU）
+akshare>=1.20.0,<1.21
+baostock>=0.8.9,<0.9
+lightgbm>=4.5,<5
+pandas>=2.2,<4
+numpy>=1.26,<3
+pyarrow>=16,<27
