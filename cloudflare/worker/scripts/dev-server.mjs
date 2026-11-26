@@ -135,7 +135,7 @@ const db = createD1(DB_PATH);
 await db.exec(readFileSync(join(WORKER_DIR, "schema.sql"), "utf8"));
 let seeded = false;
 if (!NO_SEED) {
-  const countRow = await db.prepare("SELECT COUNT(*) AS n FROM signals").first();
+  const countRow = await db.prepare("SELECT COUNT(*) AS n FROM signal_log").first();
   if (Number(countRow?.n ?? 0) === 0) {
     await db.exec(readFileSync(join(WORKER_DIR, "seed.sql"), "utf8"));
     seeded = true;

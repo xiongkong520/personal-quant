@@ -1,6 +1,6 @@
 /**
- * 指数日 K 线（GET /api/kline?symbol=sh000001 等）：实时从东方财富拉取并缓存 5 分钟。
- * 不写 D1、不依赖 db.ts / market_live.ts；网络失败返回 null 由调用方决定降级。
+ * 实时 K 线（GET /api/kline）：指数 / 个股都实时从东财拉取并缓存 5 分钟。
+ * D1 瘦身后不再落库历史 K 线（历史行情在本地 Parquet），云端只做实时视图。
  */
 import { INDEX_NAMES } from "./stock_pool.ts";
 
@@ -9,7 +9,12 @@ const SECIDS: Record<string, string> = {
   sz399001: "0.399001",
   sz399006: "0.399006",
   sh000300: "1.000300",
+  sh000688: "1.000688",
+  sh000905: "1.000905",
+  sh000852: "1.000852",
 };
+
+const INDEX_CODE_SET = new Set(Object.keys(SECIDS));
 
 export interface IndexKlineItem {
   symbol: string;
@@ -39,12 +44,30 @@ function round(value: number, digits = 2): number {
   return Math.round(value * pow) / pow;
 }
 
-async function fetchFromEastmoney(symbol: string): Promise<IndexKlineItem[] | null> {
-  const secid = SECIDS[symbol];
+function ma(closes: number[], window: number): number | null {
+  if (closes.length < window) return null;
+  const slice = closes.slice(-window);
+  return round(slice.reduce((a, b) => a + b, 0) / slice.length, 2);
+}
+
+function secidOf(symbol: string): string | null {
+  if (SECIDS[symbol]) return SECIDS[symbol];
+  if (/^sh\d{6}$/.test(symbol)) return `1.${symbol.slice(2)}`;
+  if (/^sz\d{6}$/.test(symbol)) return `0.${symbol.slice(2)}`;
+  if (/^bj\d{6}$/.test(symbol)) return `0.${symbol.slice(2)}`;
+  if (/^\d{6}$/.test(symbol)) {
+    // 东财 secid：6/9 开头为沪市，其余深市/北交所
+    return symbol.startsWith("6") || symbol.startsWith("9") ? `1.${symbol}` : `0.${symbol}`;
+  }
+  return null;
+}
+
+async function fetchKlineRaw(symbol: string, fqt: number): Promise<IndexKlineItem[] | null> {
+  const secid = secidOf(symbol);
   if (!secid) return null;
   const url =
     "https://push2his.eastmoney.com/api/qt/stock/kline/get" +
-    `?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&beg=20240101&end=20500101`;
+    `?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=${fqt}&beg=20240101&end=20500101`;
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 6000);
@@ -55,8 +78,8 @@ async function fetchFromEastmoney(symbol: string): Promise<IndexKlineItem[] | nu
     if (!resp.ok) return null;
     const payload = (await resp.json()) as { data?: { klines?: string[] } };
     const lines = payload?.data?.klines ?? [];
-    const closes: number[] = [];
     const items: IndexKlineItem[] = [];
+    const closes: number[] = [];
     for (const line of lines) {
       const parts = line.split(",");
       if (parts.length < 7) continue;
@@ -80,32 +103,47 @@ async function fetchFromEastmoney(symbol: string): Promise<IndexKlineItem[] | nu
         close: round(close),
         volume: Number.isFinite(volume) ? volume : null,
         amount: Number.isFinite(amount) ? amount : null,
-        pct_chg: prev ? round((close / prev - 1) * 100) : null,
-        ma5: idx >= 4 ? round(closes.slice(idx - 4, idx + 1).reduce((s, v) => s + v, 0) / 5, 3) : null,
-        ma10: idx >= 9 ? round(closes.slice(idx - 9, idx + 1).reduce((s, v) => s + v, 0) / 10, 3) : null,
-        ma20: idx >= 19 ? round(closes.slice(idx - 19, idx + 1).reduce((s, v) => s + v, 0) / 20, 3) : null,
+        pct_chg: prev && prev > 0 ? round((close / prev - 1) * 100) : null,
+        ma5: null,
+        ma10: null,
+        ma20: null,
       });
     }
-    return items.length ? items : null;
+    if (items.length === 0) return null;
+    for (const item of items) {
+      item.ma5 = ma(closes.slice(0, closes.indexOf(item.close as number) + 1), 5);
+      item.ma10 = ma(closes.slice(0, closes.indexOf(item.close as number) + 1), 10);
+      item.ma20 = ma(closes.slice(0, closes.indexOf(item.close as number) + 1), 20);
+    }
+    return items;
   } catch {
     return null;
   }
 }
 
-export async function fetchIndexKline(symbol: string, limit: number): Promise<{
-  name: string;
-  items: IndexKlineItem[];
-} | null> {
-  if (!SECIDS[symbol]) return null;
-  let items: IndexKlineItem[] | null = null;
-  const cached = cache.get(symbol);
-  if (cached && Date.now() - cached.at < CACHE_MS) {
-    items = cached.items;
-  } else {
-    items = await fetchFromEastmoney(symbol);
-    if (items) cache.set(symbol, { at: Date.now(), items });
-  }
-  if (!items) return null;
-  const tail = items.slice(-Math.max(1, Math.min(limit, 250)));
-  return { name: INDEX_NAMES[symbol] ?? symbol, items: tail };
+/** 指数 K 线（兼容保留：sh000001/sz399001/sz399006/sh000300/sh000688/sh000905/sh000852）。 */
+export async function fetchIndexKline(symbol: string, limit = 120): Promise<IndexKlineItem[] | null> {
+  if (!INDEX_CODE_SET.has(symbol)) return null;
+  return fetchRealtimeKline(symbol, limit, 1);
+}
+
+/** 个股/指数通用实时 K 线（个股前复权 fqt=1，与"个股 K 线用前复权"口径一致）。 */
+export async function fetchRealtimeKline(symbol: string, limit = 120, fqt = 1): Promise<IndexKlineItem[] | null> {
+  const cap = Math.min(Math.max(Math.trunc(limit), 1), 250);
+  const cached = cache.get(`${symbol}:${fqt}:${cap}`);
+  if (cached && Date.now() - cached.at < CACHE_MS) return cached.items;
+  const items = await fetchKlineRaw(symbol, fqt);
+  if (!items || items.length === 0) return null;
+  const sliced = items.slice(-cap);
+  cache.set(`${symbol}:${fqt}:${cap}`, { at: Date.now(), items: sliced });
+  return sliced;
+}
+
+/** 指数名称（/api/kline 返回 name 用）。 */
+export function indexName(symbol: string): string {
+  return INDEX_NAMES[symbol] ?? symbol;
+}
+
+export function isIndexSymbol(symbol: string): boolean {
+  return INDEX_CODE_SET.has(symbol) || /^(sh|sz)\d{6}$/.test(symbol);
 }

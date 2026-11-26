@@ -9,7 +9,7 @@
  *
  * 触发：POST /api/ai/generate（x-ingest-token 保护），由 Worker Cron 或本地脚本调用。
  */
-import { queryEvents, queryLatestJsonSnapshot, queryLatestMarket } from "./db.ts";
+import { buildMarketOverview, toLegacyMarketSnapshot } from "./market_overview.ts";
 import { nowIsoShanghai } from "./market_live.ts";
 import type { Env } from "./types.ts";
 
@@ -116,13 +116,22 @@ export async function generateAiInsight(env: Env, force = false): Promise<AiInsi
     const cached = await getAiInsight(env);
     if (cached) return cached;
   }
-  const events = await queryEvents(env.DB, 12);
-  const market = await queryLatestMarket(env.DB);
-  const regime = await queryLatestJsonSnapshot(env.DB, "regime_snapshots");
-  const snapshot = (market?.snapshot ?? {}) as Record<string, unknown>;
-  const sentiment = (snapshot["sentiment"] ?? {}) as Record<string, unknown>;
+  // D1 瘦身后（0009）：市场数据实时来自 /api/market-overview，事件/regime 大表已删除
+  const overview = await buildMarketOverview({});
+  const snapshot = toLegacyMarketSnapshot(overview);
+  const events: Array<Record<string, unknown>> = [];
+  const breadth = (overview["breadth"] ?? {}) as Record<string, unknown>;
+  const sentiment = (breadth["sentiment"] ?? {}) as Record<string, unknown>;
   const activity = (snapshot["activity"] ?? {}) as Record<string, unknown>;
   const indices = Array.isArray(snapshot["indices"]) ? (snapshot["indices"] as Array<Record<string, unknown>>) : [];
+  const sectors = (overview["sectors"] ?? {}) as Record<string, unknown>;
+  const industry = (sectors["industry"] ?? {}) as Record<string, unknown>;
+  const regime = {
+    market_state: { state: sentiment["state"] ?? "neutral", label: sentiment["label"] ?? "中性" },
+    emotion: sentiment,
+    leaders: Array.isArray(industry["gainers"]) ? (industry["gainers"] as unknown[]).slice(0, 5) : [],
+  };
+  void events;
 
   const eventList = events.map((item) => ({
     title: String(item["title"] ?? "").slice(0, 80),

@@ -193,3 +193,19 @@ export function jsonResult(payload: unknown): Response {
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
+
+/**
+ * 主动写入缓存（Cron 预热用）：同时写 Cache API 与 D1 二级缓存（fresh + lkg）。
+ * 供 daily_sync 预热 /api/market-overview / /api/market，让首个用户请求直接 HIT。
+ */
+export async function putCacheEntry(source: string | Request, data: unknown, ttlSec: number, db?: D1Database): Promise<void> {
+  const url = typeof source === "string" ? source : source.url;
+  const freshApiKey = cacheKey(url);
+  const lkgApiKey = cacheKey(url, "&lkg=1");
+  await Promise.all([
+    writeCacheApi(freshApiKey, data, ttlSec),
+    writeCacheApi(lkgApiKey, data, LKG_TTL_SEC),
+    writeD1(db, d1FreshKey(url), data, ttlSec),
+    writeD1(db, d1LkgKey(url), data, LKG_TTL_SEC),
+  ]);
+}

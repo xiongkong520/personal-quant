@@ -1,66 +1,66 @@
 /**
- * 个人量化工作台 · Cloudflare Worker 入口（含安全层）
+ * 个人量化工作台 · Cloudflare Worker 入口（v2 · D1 瘦身 + 市场全景 + 边缘缓存）
+ *
+ * 数据架构（0009 迁移后）：
+ * - 实时市场全景：/api/market-overview（腾讯指数 + 乐咕宽度 + 新浪行业 + 炸板率），60s 边缘缓存
+ *   （Cache API 一级 + D1 edge_cache 二级；workers.dev 上 Cache API no-op，D1 保证 MISS→HIT）
+ * - 历史 K 线：不再入 D1，/api/kline 实时拉东财并缓存 5 分钟
+ * - D1 轻量表：signal_log（信号）、account_snapshot / positions / order_log（模拟盘）
+ *   以及 stock_names（搜索映射）、edge_cache（边缘缓存二级）
+ * - 旧大表（klines/intraday/boards/market/events/regime/backtest/paper 快照/signals）已删除，
+ *   旧接口保留兼容响应（空数据 + degraded 标记），避免前端/脚本 500。
  *
  * 端点：
- *   GET  /api/config    公开：Turnstile sitekey + 验证说明（前端启动时读）
- *   POST /api/verify    公开：{token} -> Turnstile 校验通过后 Set-Cookie quant_pass（HMAC，1 小时）
- *   GET  /api/health    公开：健康检查（D1/模型/安全配置；监控请带浏览器 UA + Accept）
- *   GET  /api/signals   需 quant_pass：{schema, items, updated_at}；?symbols=&limit=&latest=1&status=
- *   GET  /api/stream    需 quant_pass：SSE 新信号推送，30s 心跳
- *   GET  /api/model     需 quant_pass：Worker 打包的 §5 模型权重（附加端点）
- *   POST /api/ingest    需 x-ingest-token / Bearer QUANT_INGEST_TOKEN：本地 Python 推送信号
- *   GET  /api/search    需 quant_pass：全市场搜索 ?q=（代码前缀/名称/拼音首字母；D1 stock_names + 静态池）
- *   GET  /api/kline     需 quant_pass：个股/指数日线（个股 D1 klines，指数东财实时，最多 250 根）?symbol=&limit=
- *   POST /api/kline/ingest  需 x-ingest-token：本地批量推送日线（幂等 upsert）
- *   GET  /api/regime    需 quant_pass：最新大盘状态/情绪/主线/仓位快照
- *   POST /api/regime/ingest 需 x-ingest-token：本地推送大盘状态快照
- *   GET  /api/intraday   需 quant_pass：指数当日分时 ?code=sh000001（Worker Cron 每 5 分钟覆盖写）
- *   GET  /api/market/history 需 quant_pass：某交易日市场快照序列 ?date=（盘中情绪曲线）
- *   GET  /api/summary/latest 需 quant_pass：最近午评 + 收评
- *   GET  /api/summaries 需 quant_pass：午评/收评列表 ?limit=
- *   GET  /api/boards    需 quant_pass：板块行情榜 ?type=industry|concept&limit=
- *   POST /api/daily-sync 需 x-ingest-token：手动触发收盘同步/午评/收评（?session 或 body.mode）
- *   其余路径                    静态资源（cloudflare/pages/ 由 frontend-dev 产出；空目录返回提示 JSON）
- *
- * 安全层（详见 src/security.ts）：
- *   - 反爬：UA 黑名单 + Accept 校验 → 403；跨域 Origin → 403/不带 CORS；安全响应头；
- *   - 限流：cf-connecting-ip 每分钟 60 次（env.RATE_LIMIT_PER_MIN 可调；KV 可选）→ 429 + Retry-After；
- *   - 人机验证：/api/signals、/api/stream、/api/model 要求 quant_pass cookie（未通过 401 + {"challenge":true}）。
- *   - /api/ingest 是 token 鉴权的机器接口，不受 UA/Accept 反爬限制（Python httpx 直接推送）。
- *
- * 所有密钥只从 env 读取（本地 .dev.vars / 部署 wrangler secret）；代码里只有 Cloudflare 官方测试密钥。
+ *   GET  /api/config /api/health /api/me /api/model
+ *   POST /api/verify（Turnstile -> quant_pass cookie）
+ *   GET  /api/market-overview  市场全景聚合（§3.1 契约）
+ *   GET  /api/market           兼容旧结构（内部复用 market-overview）
+ *   GET  /api/intraday         指数实时分时（东财 trends2，30s 缓存）
+ *   GET  /api/kline            个股/指数实时 K 线（东财，60s 缓存 + 模块内 5 分钟缓存）
+ *   GET  /api/boards           行业板块榜（来自 market-overview，120s 缓存）
+ *   GET  /api/signals /api/stream /api/search /api/stock
+ *   GET  /api/paper            模拟盘聚合（account_snapshot + positions + order_log）
+ *   GET  /api/account /api/positions /api/orders /api/signal-log
+ *   POST /api/ingest /api/signal-log/ingest /api/account/ingest /api/positions/ingest /api/orders/ingest
+ *   POST /api/stock-names/ingest /api/daily-sync /api/ai/generate
+ *   GET  /api/ai/insight /api/summary/latest /api/summaries /api/events /api/regime /api/backtest /api/market/history
+ *   其余路径 -> 静态资源（cloudflare/pages/）
  */
 import modelJson from "../models/model.json" with { type: "json" };
 
 import { confidenceOf, directionOf, predictProba, validateModel, type QuantModel } from "./model.ts";
-import { generateAiInsight, getAiInsight, ingestAiInsight, type AiInsight } from "./ai_proxy.ts";
-import { applyCacheHeaders, PassthroughError, withEdgeCache, type CachedResult } from "./cache.ts";
 import { refreshMarketLive } from "./market_live.ts";
-import { buildMarketSummary, handleScheduledCron, refreshIntradayIndex, runManualDailySync, syncDailyClose } from "./daily_sync.ts";
+import { handleScheduledCron, runManualDailySync } from "./daily_sync.ts";
+import { applyCacheHeaders, withEdgeCache, PassthroughError, type CachedResult } from "./cache.ts";
+import {
+  buildMarketOverview,
+  fetchIntradayData,
+  overviewToBoardRows,
+  parseOverviewParams,
+  toLegacyMarketSnapshot,
+} from "./market_overview.ts";
+import { fetchRealtimeKline, indexName, isIndexSymbol } from "./index_kline.ts";
+import { searchStocks } from "./search.ts";
+import { generateAiInsight, getAiInsight } from "./ai_proxy.ts";
 import {
   d1Health,
-  insertJsonSnapshot,
-  insertMarketSnapshot,
-  insertSignals,
-  queryBoards,
-  queryEvents,
-  queryIntradayIndex,
-  queryLatestJsonSnapshot,
-  queryLatestMarket,
-  queryLatestSummaries,
-  queryMarketHistory,
-  queryMarketSummaries,
-  querySignals,
-  queryKlines,
+  ensureSchema,
+  queryLatestAccount,
+  queryOrders,
+  queryPositions,
+  querySignalLog,
   queryStockName,
-  upsertEvents,
-  upsertKlines,
+  replacePositions,
+  upsertAccountSnapshot,
+  upsertOrders,
+  upsertSignalLog,
   upsertStockNames,
+  type AccountSnapshotRow,
+  type OrderLogRow,
+  type PositionRow,
+  type SignalLogRow,
 } from "./db.ts";
-import type { KlineRow } from "./db.ts";
 import { extractIngestToken, MAX_INGEST_BYTES, normalizeSignal, nowShanghai, parseIngestBody, timingSafeEqual } from "./signals.ts";
-import { searchStocks } from "./search.ts";
-import { fetchIndexKline } from "./index_kline.ts";
 import {
   applySecurityHeaders,
   checkAcceptHeader,
@@ -83,14 +83,11 @@ import {
 import type { Env, SignalRow } from "./types.ts";
 
 const SERVICE = "personal-quant-dashboard";
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const SCHEMA_VERSION = 1;
 
-/** SSE 心跳间隔（task 要求 30s）。 */
 const SSE_HEARTBEAT_MS = 30_000;
-/** SSE 轮询 D1 找新信号的间隔。 */
 const SSE_POLL_MS = 5_000;
-/** SSE 单连接最长存活时间，到点主动结束，EventSource 会自动重连。 */
 const SSE_MAX_LIFETIME_MS = 30 * 60_000;
 
 const QUANT_MODEL = modelJson as unknown as QuantModel;
@@ -117,40 +114,19 @@ function jsonResponse(data: unknown, status = 200, extraHeaders: Record<string, 
   });
 }
 
-/**
- * GET 数据接口统一边缘缓存包装（模块一）：
- * - **先鉴权后缓存**：未通过人机验证（或无信任 IP）时直接 401，绝不返回缓存内容；
- * - 60s 缓存命中直接返回（X-Cache: HIT），不穿透外部行情源；
- * - 上游失败返回最近一次有效快照（X-Cache: STALE）；
- * - 非 200（challenge/参数错误/限流）原样放行，不写缓存、不拿 lkg 冒充。
- */
-async function cachedRoute(
-  request: Request,
-  env: Env,
-  ttlSec: number,
-  handler: () => Promise<Response>,
-  decorate?: (data: unknown, result: CachedResult) => unknown,
-): Promise<Response> {
-  // 鉴权必须在缓存读取之前（否则 fresh HIT 会绕过 challenge），
-  // 可信 IP 由 requireChallenge 内部豁免。
-  const challenge = await requireChallenge(request, env);
-  if (challenge) return challenge;
-  try {
-    const result = await withEdgeCache(request, ttlSec, async () => {
-      const resp = await handler();
-      if (resp.status !== 200) throw new PassthroughError(resp);
-      return await resp.json();
-    }, env.DB);
-    const payload = decorate ? decorate(result.data, result) : result.data;
-    return applyCacheHeaders(jsonResponse(payload, 200), { ...result });
-  } catch (err) {
-    if (err instanceof PassthroughError) return err.response;
-    return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  }
-}
-
 function errorResponse(status: number, error: string, message: string, extra: Record<string, unknown> = {}): Response {
   return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error, message, ...extra }, status);
+}
+
+/** 已废弃的旧 ingest 接口：返回 200 兼容响应，避免 GitHub Actions/旧脚本 500。 */
+function deprecatedIngest(feature: string, hint: string): Response {
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    accepted: 0,
+    deprecated: true,
+    message: `${feature} 已废弃：${hint}`,
+  });
 }
 
 function normalizePath(pathname: string): string {
@@ -194,7 +170,6 @@ function forbiddenClient(reason: string, message: string): Response {
   return errorResponse(403, "forbidden_client", message, { reason });
 }
 
-/** 未通过人机验证：401 + challenge:true（前端据此弹 Turnstile 卡片，不当错误处理）。 */
 function challengeRequired(): Response {
   return jsonResponse(
     {
@@ -214,40 +189,155 @@ async function requireChallenge(request: Request, env: Env): Promise<Response | 
   return challengeRequired();
 }
 
-/** 推送 token 只能来自环境变量；兼容旧名 INGEST_TOKEN。 */
 function readIngestToken(env: Env): string {
   return (env.QUANT_INGEST_TOKEN ?? env.INGEST_TOKEN ?? "").trim();
+}
+
+/** 机器接口 token 校验（x-ingest-token / Bearer）；失败返回 Response，成功返回 null。 */
+function requireMachineToken(request: Request, env: Env): Response | null {
+  const token = readIngestToken(env);
+  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
+  const got = extractIngestToken(request);
+  if (!got || !timingSafeEqual(got, token)) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+  }
+  return null;
+}
+
+/**
+ * GET 数据接口统一边缘缓存包装：
+ * - 先鉴权（challenge）后读缓存；
+ * - HIT/MISS/STALE 统一 X-Cache 头；非 200 透传不缓存；上游失败回 last-known-good 并标 STALE。
+ */
+async function cachedRoute(
+  request: Request,
+  env: Env,
+  ttlSec: number,
+  handler: () => Promise<Response>,
+  decorate?: (data: unknown, result: CachedResult) => unknown,
+): Promise<Response> {
+  const challenge = await requireChallenge(request, env);
+  if (challenge) return challenge;
+  if (env.DB) {
+    try {
+      await ensureSchema(env.DB);
+    } catch {
+      // 建表失败不阻塞主流程；缓存层自行降级
+    }
+  }
+  try {
+    const result = await withEdgeCache(
+      request,
+      ttlSec,
+      async () => {
+        const resp = await handler();
+        if (resp.status !== 200) throw new PassthroughError(resp);
+        return await resp.json();
+      },
+      env.DB,
+    );
+    const payload = decorate ? decorate(result.data, result) : result.data;
+    return applyCacheHeaders(jsonResponse(payload, 200), { ...result });
+  } catch (err) {
+    if (err instanceof PassthroughError) return err.response;
+    console.error(`[worker] 缓存路由失败：${err instanceof Error ? err.message : String(err)}`);
+    return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  }
+}
+
+function cacheDecorate(ttlSec: number) {
+  return (data: unknown, result: CachedResult): unknown => {
+    const base = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
+    return {
+      ...base,
+      cache: {
+        hit: result.cacheState === "HIT",
+        age_sec: result.ageSec,
+        ttl: ttlSec,
+        stale: result.cacheState === "STALE",
+      },
+    };
+  };
 }
 
 // ---------------------------------------------------------------- health ----
 
 async function handleHealth(env: Env): Promise<Response> {
-  // 对外只暴露运行状态；数据库/后端实现细节不写入响应（需要时看服务端日志）
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    service: SERVICE,
-    version: env.WORKER_VERSION ?? VERSION,
-    now: nowShanghai(),
-    model_version: QUANT_MODEL.version,
-  });
-}
-
-/** GET /api/me：访客自己的 IP 与是否可信（开发测试用；不暴露内部实现）。 */
-function handleMe(request: Request, env: Env): Response {
-  const trusted = isTrustedIp(request, env);
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    ip: clientIp(request),
-    trusted,
-    challenge_required: !trusted,
-  });
+  const d1 = await d1Health(env.DB);
+  const tokenConfigured = readIngestToken(env).length > 0;
+  const cookieKeyConfigured = readCookieKey(env).length > 0;
+  const ok = d1.status === "ok" && modelError === null;
+  return jsonResponse(
+    {
+      schema: SCHEMA_VERSION,
+      ok,
+      service: SERVICE,
+      version: env.WORKER_VERSION ?? VERSION,
+      now: nowShanghai(),
+      environment: "cloudflare-worker",
+      d1: { ...d1, storage: "light-tables-v2" },
+      ingest: {
+        token_configured: tokenConfigured,
+        auth: "Authorization: Bearer <QUANT_INGEST_TOKEN> 或 X-Ingest-Token",
+        endpoints: [
+          "POST /api/ingest (signal_log 兼容映射)",
+          "POST /api/signal-log/ingest",
+          "POST /api/account/ingest",
+          "POST /api/positions/ingest",
+          "POST /api/orders/ingest",
+          "POST /api/stock-names/ingest",
+          "POST /api/daily-sync",
+        ],
+      },
+      security: {
+        ua_filter: true,
+        accept_check: true,
+        same_origin_cors: true,
+        rate_limit_per_min: readRateLimitPerMin(env),
+        rate_limit_backend: env.RATE_LIMIT_KV ? "kv" : "memory",
+        challenge_required_for: ["/api/signals", "/api/stream", "/api/model"],
+        trusted_ip_configured: Boolean((env.TRUSTED_IPS ?? "").trim()),
+        cookie: { name: COOKIE_NAME, ttl_seconds: COOKIE_TTL_SECONDS, cookie_key_configured: cookieKeyConfigured },
+        turnstile: {
+          sitekey: readTurnstileSitekey(env),
+          using_test_keys: readTurnstileSitekey(env) === TURNSTILE_TEST_SITEKEY || !env.TURNSTILE_SECRET,
+          secret_configured: Boolean((env.TURNSTILE_SECRET ?? "").trim()),
+          verify_endpoint_override: Boolean((env.TURNSTILE_VERIFY_URL ?? "").trim()),
+        },
+      },
+      model: {
+        schema: QUANT_MODEL.schema,
+        version: QUANT_MODEL.version,
+        kind: QUANT_MODEL.kind,
+        classes: QUANT_MODEL.classes,
+        features: Array.isArray(QUANT_MODEL.features) ? QUANT_MODEL.features.length : 0,
+        error: modelError,
+      },
+      endpoints: [
+        "GET /api/config",
+        "POST /api/verify",
+        "GET /api/health",
+        "GET /api/market-overview",
+        "GET /api/market",
+        "GET /api/kline",
+        "GET /api/intraday",
+        "GET /api/boards",
+        "GET /api/signals",
+        "GET /api/stream",
+        "GET /api/search",
+        "GET /api/paper",
+        "GET /api/summary/latest",
+        "GET /api/summaries",
+        "GET /api/ai/insight",
+        "POST /api/ai/generate",
+      ],
+    },
+    ok ? 200 : 503,
+  );
 }
 
 // ---------------------------------------------------------------- config ----
 
-/** GET /api/config：前端启动时判断是否需要 Turnstile（始终 challenge=true，避免本地/生产行为不一致）。 */
 function handleConfig(env: Env): Response {
   const sitekey = readTurnstileSitekey(env);
   return jsonResponse({
@@ -301,19 +391,16 @@ async function readTokenField(request: Request): Promise<{ token?: string; error
 
 async function handleVerify(request: Request, env: Env): Promise<Response> {
   if (!readCookieKey(env)) {
-    return errorResponse(503, "server_misconfigured", "验证服务暂不可用，请稍后重试");
+    return errorResponse(503, "server_misconfigured", "COOKIE_KEY 未配置：本地写 .dev.vars；部署 wrangler secret put COOKIE_KEY");
   }
   const parsed = await readTokenField(request);
   if (parsed.error || !parsed.token) return errorResponse(400, "invalid_body", parsed.error ?? "缺少 token");
-
   const result = await verifyTurnstileToken(env, parsed.token, clientIp(request));
   if (!result.ok) {
     return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "challenge_failed", errors: result.errors }, 403);
   }
   const pass = await issuePassCookie(env);
-  if (!pass) {
-    return errorResponse(503, "server_misconfigured", "验证服务暂不可用，请稍后重试");
-  }
+  if (!pass) return errorResponse(503, "server_misconfigured", "COOKIE_KEY 未配置，无法签发 quant_pass");
   return jsonResponse(
     {
       schema: SCHEMA_VERSION,
@@ -343,7 +430,6 @@ function handleModel(): Response {
       schema: SCHEMA_VERSION,
       ok: modelError === null,
       source: "cloudflare/worker/models/model.json",
-      note: "模型权重已同步。",
       model: QUANT_MODEL,
       parity_probe: { zero_features: probe },
     },
@@ -351,283 +437,583 @@ function handleModel(): Response {
   );
 }
 
-// -------------------------------------------------------------- signals ----
+// ---------------------------------------------------------------- signals ----
 
 async function handleSignals(env: Env, url: URL): Promise<Response> {
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-
+  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置（检查 wrangler.toml）");
   const limitRaw = Number(url.searchParams.get("limit") ?? "200");
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 500) : 200;
-
   const symbolsRaw = (url.searchParams.get("symbols") ?? "").trim();
-  const symbols = symbolsRaw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const symbols = symbolsRaw.split(",").map((s) => s.trim()).filter(Boolean);
   if (symbols.length > 50) return errorResponse(400, "invalid_symbols", "symbols 最多 50 个");
-  const badSymbol = symbols.find((s) => !/^\d{6}$/.test(s));
-  if (badSymbol) return errorResponse(400, "invalid_symbols", `symbols 必须是 6 位数字代码，收到 ${JSON.stringify(badSymbol)}`);
-
+  const bad = symbols.find((s) => !/^\d{6}$/.test(s));
+  if (bad) return errorResponse(400, "invalid_symbols", `symbols 必须是 6 位数字代码，收到 ${JSON.stringify(bad)}`);
   const latest = ["1", "true", "yes"].includes((url.searchParams.get("latest") ?? "").toLowerCase());
-  const statusRaw = url.searchParams.get("status");
-  if (statusRaw && !["ok", "stale", "warming_up"].includes(statusRaw)) {
-    return errorResponse(400, "invalid_status", "status 只支持 ok / stale / warming_up");
-  }
-
-  const { items, updated_at } = await querySignals(env.DB, { limit, symbols, latest, status: statusRaw ?? undefined });
+  const { items, updated_at } = await querySignalLog(env.DB, { limit, symbols, latest });
   return jsonResponse({ schema: SCHEMA_VERSION, items, updated_at });
 }
 
-// --------------------------------------------------------------- ingest ----
-
-async function handleIngest(request: Request, env: Env): Promise<Response> {
-  const expected = readIngestToken(env);
-  if (!expected) {
-    return errorResponse(
-      503,
-      "ingest_token_not_configured",
-      "未配置推送 token：本地在 cloudflare/worker/.dev.vars 写 QUANT_INGEST_TOKEN=...；部署用 wrangler secret put QUANT_INGEST_TOKEN",
-    );
-  }
-  const provided = extractIngestToken(request);
-  if (!provided) {
-    return jsonResponse(
-      { schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" },
-      401,
-      { "www-authenticate": "Bearer" },
-    );
-  }
-  if (!timingSafeEqual(provided, expected)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "token 无效" }, 401, {
-      "www-authenticate": "Bearer",
-    });
-  }
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-
-  const declaredLength = Number(request.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_INGEST_BYTES) {
-    return errorResponse(413, "payload_too_large", `单次推送不能超过 ${MAX_INGEST_BYTES} 字节`, { limit_bytes: MAX_INGEST_BYTES });
-  }
-
-  let text: string;
-  try {
-    text = await request.text();
-  } catch (err) {
-    return errorResponse(400, "invalid_body", `读取请求体失败：${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (text.length > MAX_INGEST_BYTES) {
-    return errorResponse(413, "payload_too_large", `单次推送不能超过 ${MAX_INGEST_BYTES} 字节`, { limit_bytes: MAX_INGEST_BYTES });
-  }
-
-  let body: unknown;
-  try {
-    body = JSON.parse(text);
-  } catch (err) {
-    return errorResponse(400, "invalid_json", `请求体不是合法 JSON：${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  const parsed = parseIngestBody(body);
-  if (parsed.error) return errorResponse(400, "invalid_body", parsed.error);
-
-  const nowIso = nowShanghai();
-  const rows: SignalRow[] = [];
-  const acceptedWarnings: { index: number; warnings: string[] }[] = [];
-  const rejected: { index: number; errors: string[]; warnings: string[] }[] = [];
-
-  parsed.signals.forEach((raw, index) => {
-    const result = normalizeSignal(raw, nowIso);
-    if (result.row) {
-      rows.push(result.row);
-      if (result.warnings.length > 0) acceptedWarnings.push({ index, warnings: result.warnings });
-    } else {
-      rejected.push({ index, errors: result.errors, warnings: result.warnings });
-    }
-  });
-
-  if (rows.length === 0) {
-    return jsonResponse(
-      {
-        schema: SCHEMA_VERSION,
-        ok: false,
-        error: "all_signals_rejected",
-        message: "所有信号都未通过校验",
-        accepted: 0,
-        rejected,
-      },
-      400,
-    );
-  }
-
-  const inserted = await insertSignals(env.DB, rows);
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    accepted: inserted.accepted,
-    rejected,
-    warnings: acceptedWarnings,
-    signal_ids: rows.map((r) => r.signal_id),
-    updated_at: inserted.updated_at,
-  });
+function signalRowToLogRow(row: SignalRow, name: string | null): SignalLogRow {
+  return {
+    id: row.signal_id,
+    symbol: row.symbol,
+    name,
+    trade_date: row.trade_date,
+    horizon: row.horizon,
+    prob_up: row.prob_up,
+    prob_flat: row.prob_flat,
+    prob_down: row.prob_down,
+    confidence: row.confidence,
+    direction: row.direction,
+    rank_score: row.confidence,
+    top_features: row.top_features,
+    model_version: row.model_version,
+    expires_at: row.expires_at,
+    created_at: row.created_at,
+  };
 }
 
-// ---------------------------------------------------------------- stock ----
-
-/** GET /api/stock?symbol=600519：个股快照（D1 中已推送的最新信号 + 名称）。 */
+/** GET /api/stock?symbol=600519：个股快照（signal_log 最新一条 + 名称）。 */
 async function handleStock(request: Request, env: Env, url: URL): Promise<Response> {
   const guard = await requireChallenge(request, env);
   if (guard) return guard;
-  const symbol = (url.searchParams.get("symbol") ?? "").trim();
-  if (!/^\d{6}$/.test(symbol)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, message: "请输入 6 位股票代码" }, 400);
-  }
   if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const result = await querySignals(env.DB, { symbols: [symbol], latest: true, limit: 1 });
+  const symbol = (url.searchParams.get("symbol") ?? "").trim();
+  if (!/^\d{6}$/.test(symbol)) return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码");
+  const { items } = await querySignalLog(env.DB, { symbols: [symbol], latest: true, limit: 1 });
   const name = (await queryStockName(env.DB, symbol)) ?? "";
-  if (result.items.length === 0) {
-    return jsonResponse(
-      { schema: SCHEMA_VERSION, ok: false, symbol, name, message: "该代码暂无数据（当前仅覆盖已推送标的）" },
-      404,
-    );
-  }
   return jsonResponse({
     schema: SCHEMA_VERSION,
     ok: true,
     symbol,
     name,
-    signal: result.items[0],
-    updated_at: result.updated_at,
+    signal: items[0] ?? null,
+    updated_at: items[0]?.created_at ?? null,
   });
 }
 
-/** POST /api/stock-names/ingest：本地推送代码→名称映射（x-ingest-token）。 */
-async function handleStockNamesIngest(request: Request, env: Env): Promise<Response> {
-  const token = readIngestToken(env);
-  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const got = extractIngestToken(request);
-  if (!got || !timingSafeEqual(got, token)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+// ------------------------------------------------------- 轻量表 ingest / 查询 ----
+
+async function readJsonBody(request: Request): Promise<{ body?: unknown; error?: Response }> {
+  const length = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(length) && length > MAX_INGEST_BYTES) {
+    return { error: errorResponse(413, "payload_too_large", `单次推送不能超过 ${MAX_INGEST_BYTES} 字节`) };
   }
-  let body: unknown;
+  let text: string;
   try {
-    body = await request.json();
-  } catch {
-    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
+    text = await request.text();
+  } catch (err) {
+    return { error: errorResponse(400, "invalid_body", `读取请求体失败：${err instanceof Error ? err.message : String(err)}`) };
   }
-  const items = (body as { items?: unknown })?.items;
-  if (!Array.isArray(items)) return errorResponse(400, "invalid_body", "缺少 items");
-  const rows = items
-    .filter((item): item is { symbol: string; name: string } =>
-      Boolean(item) && typeof (item as { symbol?: unknown }).symbol === "string" && typeof (item as { name?: unknown }).name === "string")
-    .map((item) => ({ symbol: item.symbol, name: item.name }));
+  if (text.length > MAX_INGEST_BYTES) return { error: errorResponse(413, "payload_too_large", `单次推送不能超过 ${MAX_INGEST_BYTES} 字节`) };
+  try {
+    return { body: JSON.parse(text) };
+  } catch (err) {
+    return { error: errorResponse(400, "invalid_json", `请求体不是合法 JSON：${err instanceof Error ? err.message : String(err)}`) };
+  }
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+/** POST /api/ingest：兼容旧 §4 信号 JSON → 写 signal_log（幂等）。 */
+async function handleIngest(request: Request, env: Env): Promise<Response> {
+  const auth = requireMachineToken(request, env);
+  if (auth) return auth;
+  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置（检查 wrangler.toml）");
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody.error) return parsedBody.error;
+  const parsed = parseIngestBody(parsedBody.body);
+  if (parsed.error) return errorResponse(400, "invalid_body", parsed.error);
+  const nowIso = nowShanghai();
+  const rows: SignalLogRow[] = [];
+  const rejected: Array<Record<string, unknown>> = [];
+  const warnings: Array<Record<string, unknown>> = [];
+  parsed.signals.forEach((raw, index) => {
+    const result = normalizeSignal(raw, nowIso);
+    if (result.row) {
+      rows.push(signalRowToLogRow(result.row, null));
+      if (result.warnings.length > 0) warnings.push({ index, warnings: result.warnings });
+    } else {
+      rejected.push({ index, errors: result.errors, warnings: result.warnings });
+    }
+  });
+  if (rows.length === 0) {
+    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "all_signals_rejected", accepted: 0, rejected }, 400);
+  }
+  const accepted = await upsertSignalLog(env.DB, rows);
+  const latest = rows.reduce<string | null>((max, row) => (max === null || row.created_at > max ? row.created_at : max), null);
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    accepted,
+    rejected,
+    warnings,
+    signal_ids: rows.map((row) => row.id),
+    updated_at: latest,
+    storage: "signal_log",
+  });
+}
+
+/** POST /api/signal-log/ingest：新链路（可直接推 signal_log 行）。 */
+async function handleSignalLogIngest(request: Request, env: Env): Promise<Response> {
+  const auth = requireMachineToken(request, env);
+  if (auth) return auth;
+  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置");
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody.error) return parsedBody.error;
+  const body = parsedBody.body as Record<string, unknown> | null;
+  const items = Array.isArray(body) ? body : Array.isArray(body?.["items"]) ? (body?.["items"] as unknown[]) : null;
+  if (!items) return errorResponse(400, "invalid_body", "需要 items 数组");
+  const now = new Date().toISOString();
+  const rows: SignalLogRow[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const obj = item as Record<string, unknown>;
+    const symbol = typeof obj["symbol"] === "string" ? obj["symbol"].trim() : "";
+    const tradeDate = typeof obj["trade_date"] === "string" ? obj["trade_date"].trim() : "";
+    if (!/^\d{6}$/.test(symbol) || !/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)) continue;
+    const id = typeof obj["id"] === "string" ? obj["id"] : `${symbol}-${tradeDate}-${String(obj["model_version"] ?? "cloud")}`;
+    rows.push({
+      id,
+      symbol,
+      name: typeof obj["name"] === "string" ? (obj["name"] as string) : null,
+      trade_date: tradeDate,
+      horizon: typeof obj["horizon"] === "string" ? (obj["horizon"] as string) : "1d",
+      prob_up: asNumber(obj["prob_up"] ?? (obj["prob"] as Record<string, unknown> | undefined)?.["up"]),
+      prob_flat: asNumber(obj["prob_flat"] ?? (obj["prob"] as Record<string, unknown> | undefined)?.["flat"]),
+      prob_down: asNumber(obj["prob_down"] ?? (obj["prob"] as Record<string, unknown> | undefined)?.["down"]),
+      confidence: asNumber(obj["confidence"]),
+      direction: typeof obj["direction"] === "string" ? (obj["direction"] as string) : null,
+      rank_score: asNumber(obj["rank_score"] ?? obj["confidence"]),
+      top_features: typeof obj["top_features"] === "string" ? (obj["top_features"] as string) : JSON.stringify(obj["top_features"] ?? []),
+      model_version: typeof obj["model_version"] === "string" ? (obj["model_version"] as string) : null,
+      expires_at: typeof obj["expires_at"] === "string" ? (obj["expires_at"] as string) : null,
+      created_at: typeof obj["created_at"] === "string" ? (obj["created_at"] as string) : now,
+    });
+  }
+  if (rows.length === 0) return errorResponse(400, "invalid_body", "没有合法 signal 行");
+  const accepted = await upsertSignalLog(env.DB, rows);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted, skipped: items.length - rows.length });
+}
+
+/** POST /api/account/ingest：模拟盘账户快照（覆盖最新）。 */
+async function handleAccountIngest(request: Request, env: Env): Promise<Response> {
+  const auth = requireMachineToken(request, env);
+  if (auth) return auth;
+  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置");
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody.error) return parsedBody.error;
+  const body = parsedBody.body as Record<string, unknown> | null;
+  const snapshot = (body && typeof body["snapshot"] === "object" ? (body["snapshot"] as Record<string, unknown>) : body) ?? {};
+  const totalAsset = asNumber(snapshot["total_asset"] ?? snapshot["equity"]);
+  if (totalAsset === null) return errorResponse(400, "invalid_body", "缺少 total_asset / equity");
+  const cash = asNumber(snapshot["cash"]) ?? 0;
+  const marketValue = asNumber(snapshot["market_value"]) ?? Math.max(0, totalAsset - cash);
+  const row: AccountSnapshotRow = {
+    asof: typeof snapshot["asof"] === "string" ? (snapshot["asof"] as string) : nowShanghai(),
+    total_asset: totalAsset,
+    cash,
+    market_value: marketValue,
+    today_pnl: asNumber(snapshot["today_pnl"]) ?? 0,
+    total_pnl: asNumber(snapshot["total_pnl"]) ?? 0,
+    position_count: asNumber(snapshot["position_count"]) ?? 0,
+    source: typeof snapshot["source"] === "string" ? (snapshot["source"] as string) : "paper",
+    created_at: new Date().toISOString(),
+  };
+  await upsertAccountSnapshot(env.DB, row);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1, asof: row.asof });
+}
+
+/** POST /api/positions/ingest：整体替换当前持仓。 */
+async function handlePositionsIngest(request: Request, env: Env): Promise<Response> {
+  const auth = requireMachineToken(request, env);
+  if (auth) return auth;
+  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置");
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody.error) return parsedBody.error;
+  const body = parsedBody.body as Record<string, unknown> | null;
+  const items = Array.isArray(body) ? body : Array.isArray(body?.["items"]) ? (body?.["items"] as unknown[]) : null;
+  if (!items) return errorResponse(400, "invalid_body", "需要 items 数组");
+  const now = new Date().toISOString();
+  const rows: PositionRow[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const obj = item as Record<string, unknown>;
+    const symbol = typeof obj["symbol"] === "string" ? obj["symbol"].trim() : "";
+    const qty = asNumber(obj["qty"]);
+    const cost = asNumber(obj["cost_price"]);
+    if (!/^\d{6}$/.test(symbol) || qty === null || cost === null) continue;
+    rows.push({
+      symbol,
+      name: typeof obj["name"] === "string" ? (obj["name"] as string) : null,
+      qty: Math.trunc(qty),
+      cost_price: cost,
+      last_price: asNumber(obj["last_price"]),
+      market_value: asNumber(obj["market_value"]),
+      pnl: asNumber(obj["pnl"]),
+      pnl_pct: asNumber(obj["pnl_pct"]),
+      asof: typeof obj["asof"] === "string" ? (obj["asof"] as string) : nowShanghai(),
+      updated_at: now,
+    });
+  }
+  const count = await replacePositions(env.DB, rows);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: count });
+}
+
+/** POST /api/orders/ingest：订单流水（按 id 幂等）。 */
+async function handleOrdersIngest(request: Request, env: Env): Promise<Response> {
+  const auth = requireMachineToken(request, env);
+  if (auth) return auth;
+  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置");
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody.error) return parsedBody.error;
+  const body = parsedBody.body as Record<string, unknown> | null;
+  const items = Array.isArray(body) ? body : Array.isArray(body?.["items"]) ? (body?.["items"] as unknown[]) : null;
+  if (!items) return errorResponse(400, "invalid_body", "需要 items 数组");
+  const now = new Date().toISOString();
+  const rows: OrderLogRow[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const obj = item as Record<string, unknown>;
+    const symbol = typeof obj["symbol"] === "string" ? obj["symbol"].trim() : "";
+    const side = typeof obj["side"] === "string" ? (obj["side"] as string) : "";
+    const qty = asNumber(obj["qty"]);
+    const id = typeof obj["id"] === "string" ? (obj["id"] as string) : "";
+    if (!id || !/^\d{6}$/.test(symbol) || qty === null || !["buy", "sell"].includes(side)) continue;
+    rows.push({
+      id,
+      symbol,
+      name: typeof obj["name"] === "string" ? (obj["name"] as string) : null,
+      side,
+      qty: Math.trunc(qty),
+      target_price: asNumber(obj["target_price"]),
+      filled_price: asNumber(obj["filled_price"]),
+      commission: asNumber(obj["commission"]) ?? 0,
+      stamp_tax: asNumber(obj["stamp_tax"]) ?? 0,
+      transfer_fee: asNumber(obj["transfer_fee"]) ?? 0,
+      fee_total: asNumber(obj["fee_total"]) ?? 0,
+      status: typeof obj["status"] === "string" ? (obj["status"] as string) : "filled",
+      reason: typeof obj["reason"] === "string" ? (obj["reason"] as string) : null,
+      trade_date: typeof obj["trade_date"] === "string" ? (obj["trade_date"] as string) : null,
+      created_at: typeof obj["created_at"] === "string" ? (obj["created_at"] as string) : now,
+    });
+  }
+  const accepted = await upsertOrders(env.DB, rows);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted, skipped: items.length - rows.length });
+}
+
+async function handleStockNamesIngest(request: Request, env: Env): Promise<Response> {
+  const auth = requireMachineToken(request, env);
+  if (auth) return auth;
+  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置");
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody.error) return parsedBody.error;
+  const body = parsedBody.body as Record<string, unknown> | null;
+  const items = Array.isArray(body) ? body : Array.isArray(body?.["items"]) ? (body?.["items"] as unknown[]) : null;
+  if (!items) return errorResponse(400, "invalid_body", "需要 items 数组");
+  const rows: Array<{ symbol: string; name: string }> = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const obj = item as Record<string, unknown>;
+    const symbol = typeof obj["symbol"] === "string" ? obj["symbol"].trim() : "";
+    const name = typeof obj["name"] === "string" ? obj["name"].trim() : "";
+    if (/^\d{6}$/.test(symbol) && name) rows.push({ symbol, name });
+  }
   const accepted = await upsertStockNames(env.DB, rows);
   return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted });
 }
 
-// -------------------------------------------------------- events / reports ----
+// ------------------------------------------------------- 市场 / 板块 / 分时 ----
 
-/** POST /api/events/ingest：本地推送重大事件（利好/利空评分）。 */
-async function handleEventsIngest(request: Request, env: Env): Promise<Response> {
-  const token = readIngestToken(env);
-  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const got = extractIngestToken(request);
-  if (!got || !timingSafeEqual(got, token)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+/** GET /api/market-overview：市场全景（§3.1），60s 缓存 + cache 字段。 */
+async function handleMarketOverview(_request: Request, _env: Env, url: URL): Promise<Response> {
+  const params = parseOverviewParams(url);
+  if (!params) {
+    return errorResponse(400, "invalid_params", "sector_type 支持 industry/concept；sort 支持 gainers/losers；limit 1-30");
   }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
-  }
-  const items = (body as { items?: unknown })?.items;
-  if (!Array.isArray(items)) return errorResponse(400, "invalid_body", "缺少 items");
-  const accepted = await upsertEvents(env.DB, items as Array<Record<string, unknown>>);
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted });
+  const payload = await buildMarketOverview(params);
+  return jsonResponse(payload);
 }
 
-/** GET /api/events?limit=60：最新重大事件（人机验证 / 可信 IP）。 */
-async function handleEvents(request: Request, env: Env, url: URL): Promise<Response> {
+/** GET /api/market：兼容旧结构（内部复用 market-overview，保留 snapshot/updated_at 字段）。 */
+async function handleMarket(): Promise<Response> {
+  const overview = await buildMarketOverview({});
+  const snapshot = toLegacyMarketSnapshot(overview);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, snapshot, updated_at: overview["asof"], cache_source: "market-overview" });
+}
+
+/** GET /api/boards：行业板块榜（来自 market-overview sectors）。 */
+async function handleBoards(url: URL): Promise<Response> {
+  const limitRaw = Number(url.searchParams.get("limit") ?? "20");
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 100) : 20;
+  const overview = await buildMarketOverview({});
+  const items = overviewToBoardRows(overview, limit);
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    type: "industry",
+    count: items.length,
+    items,
+    updated_at: overview["asof"],
+    degraded: Boolean((overview["quality"] as Record<string, unknown> | undefined)?.["degraded"]),
+  });
+}
+
+/** GET /api/intraday?code=sh000001：指数实时分时（东财 trends2，30s 缓存）。 */
+async function handleIntraday(url: URL): Promise<Response> {
+  const code = (url.searchParams.get("code") ?? "sh000001").trim();
+  if (!/^(sh|sz)\d{6}$/.test(code)) return errorResponse(400, "invalid_code", "code 需形如 sh000001 / sz399001");
+  const data = await fetchIntradayData(code);
+  if (!data) return errorResponse(503, "data_unavailable", "分时数据暂不可用，请稍后重试");
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    code,
+    trade_date: data.trade_date,
+    updated_at: nowShanghai(),
+    stale: data.trade_date !== nowShanghai().slice(0, 10),
+    data,
+  });
+}
+
+// ------------------------------------------------------------------ kline ----
+
+async function klineHandler(url: URL): Promise<Response> {
+  const symbol = (url.searchParams.get("symbol") ?? "").trim();
+  if (!/^(\d{6}|(sh|sz|bj)\d{6})$/.test(symbol)) {
+    return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码或 sh/sz+6 位指数代码");
+  }
+  const limitRaw = Number(url.searchParams.get("limit") ?? url.searchParams.get("days") ?? "120");
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 250) : 120;
+  const kind = isIndexSymbol(symbol) ? "index" : "stock";
+  const items = await fetchRealtimeKline(symbol, limit);
+  if (!items) return errorResponse(503, "data_unavailable", "K 线数据暂不可用，请稍后重试");
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    symbol,
+    name: indexName(symbol),
+    kind,
+    limit,
+    count: items.length,
+    items,
+    updated_at: nowShanghai(),
+  });
+}
+
+// ---------------------------------------------------------------- paper ----
+
+async function handlePaper(request: Request, env: Env): Promise<Response> {
   const guard = await requireChallenge(request, env);
   if (guard) return guard;
   if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const limit = Number(url.searchParams.get("limit") ?? "60");
-  const items = await queryEvents(env.DB, Number.isFinite(limit) ? Math.trunc(limit) : 60);
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, items, updated_at: nowShanghai() });
+  const [account, positions, orders] = await Promise.all([
+    queryLatestAccount(env.DB),
+    queryPositions(env.DB),
+    queryOrders(env.DB, 20),
+  ]);
+  const degraded = account === null;
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    snapshot: {
+      account,
+      positions,
+      orders,
+      asof: account?.asof ?? null,
+    },
+    updated_at: account?.asof ?? null,
+    degraded,
+  });
 }
 
-/** POST /api/backtest/ingest 或 /api/paper/ingest：推送快照。 */
-async function handleSnapshotIngest(request: Request, env: Env, table: "backtest_reports" | "paper_snapshots"): Promise<Response> {
-  const token = readIngestToken(env);
-  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const got = extractIngestToken(request);
-  if (!got || !timingSafeEqual(got, token)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
+/** POST /api/paper/ingest：兼容旧模拟盘快照推送 -> account_snapshot（positions 可选）。 */
+async function handlePaperIngest(request: Request, env: Env): Promise<Response> {
+  const auth = requireMachineToken(request, env);
+  if (auth) return auth;
+  if (!env.DB) return errorResponse(503, "d1_not_configured", "D1 binding 未配置");
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody.error) return parsedBody.error;
+  const body = parsedBody.body as Record<string, unknown> | null;
+  const snapshot = (body && typeof body["snapshot"] === "object" ? (body["snapshot"] as Record<string, unknown>) : body) ?? {};
+  const totalAsset = asNumber(snapshot["total_asset"] ?? snapshot["equity"] ?? snapshot["total_asset_value"]);
+  const positionsRaw = Array.isArray(body?.["positions"]) ? (body?.["positions"] as unknown[]) : null;
+  if (totalAsset !== null) {
+    const row: AccountSnapshotRow = {
+      asof: typeof snapshot["asof"] === "string" ? (snapshot["asof"] as string) : nowShanghai(),
+      total_asset: totalAsset,
+      cash: asNumber(snapshot["cash"]) ?? 0,
+      market_value: asNumber(snapshot["market_value"]) ?? Math.max(0, totalAsset - (asNumber(snapshot["cash"]) ?? 0)),
+      today_pnl: asNumber(snapshot["today_pnl"]) ?? 0,
+      total_pnl: asNumber(snapshot["total_pnl"]) ?? 0,
+      position_count: asNumber(snapshot["position_count"]) ?? 0,
+      source: "paper",
+      created_at: new Date().toISOString(),
+    };
+    await upsertAccountSnapshot(env.DB, row);
   }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
-  }
-  const raw = body as Record<string, unknown> | null;
-  const snapshot = raw && typeof raw["snapshot"] === "object" && raw["snapshot"] !== null ? raw["snapshot"] : raw;
-  if (!snapshot || typeof snapshot !== "object") return errorResponse(400, "invalid_body", "缺少快照内容");
-  const saved = await insertJsonSnapshot(env.DB, table, snapshot as Record<string, unknown>);
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1, asof: saved.asof });
-}
-
-/** GET /api/backtest 或 /api/paper：最新快照（人机验证 / 可信 IP）。 */
-async function handleSnapshotGet(request: Request, env: Env, table: "backtest_reports" | "paper_snapshots"): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const snapshot = await queryLatestJsonSnapshot(env.DB, table);
-  if (!snapshot) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, message: "数据暂未同步" }, 404);
-  }
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, snapshot, updated_at: nowShanghai() }, 200);
-}
-
-// ---------------------------------------------------------- public summary ----
-
-/** GET /api/public/summary：公开只读大盘摘要（不含敏感数据，供移动端插件/第三方展示）。 */
-async function handlePublicSummary(env: Env): Promise<Response> {
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const market = await queryLatestMarket(env.DB);
-  const events = await queryEvents(env.DB, 3);
-  const snapshot = (market?.snapshot ?? {}) as Record<string, unknown>;
-  const indices = Array.isArray(snapshot["indices"]) ? (snapshot["indices"] as Array<Record<string, unknown>>) : [];
-  const sentiment = (snapshot["sentiment"] ?? {}) as Record<string, unknown>;
-  const direction = (snapshot["market_direction"] ?? {}) as Record<string, unknown>;
-  const score = Number(sentiment["score"] ?? 50);
-  const dir = String(direction["direction"] ?? "flat");
-  let state = "range";
-  let label = "震荡";
-  let range = "2-4成";
-  if (score < 20 || (score < 30 && dir === "down")) {
-    state = "ice_watch";
-    label = "冰点布局";
-    range = "0-2成";
-  } else if (score < 40 || dir === "down") {
-    state = "lean_bear";
-    label = "偏空";
-    range = "0-2成";
-  } else if (score > 80 && dir === "up") {
-    state = "offense";
-    label = "进攻";
-    range = "6-8成";
-  } else if (score > 60 && dir === "up") {
-    state = "lean_bull";
-    label = "偏多";
-    range = "4-6成";
+  let positionsAccepted = 0;
+  if (positionsRaw) {
+    const now = new Date().toISOString();
+    const rows: PositionRow[] = [];
+    for (const item of positionsRaw) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const obj = item as Record<string, unknown>;
+      const symbol = typeof obj["symbol"] === "string" ? (obj["symbol"] as string) : "";
+      const qty = asNumber(obj["qty"]);
+      const cost = asNumber(obj["avg_cost"] ?? obj["cost_price"]);
+      if (!/^\d{6}$/.test(symbol) || qty === null || cost === null) continue;
+      rows.push({
+        symbol,
+        name: null,
+        qty: Math.trunc(qty),
+        cost_price: cost,
+        last_price: asNumber(obj["last_price"]),
+        market_value: asNumber(obj["market_value"]),
+        pnl: asNumber(obj["pnl"]),
+        pnl_pct: asNumber(obj["pnl_pct"]),
+        asof: nowShanghai(),
+        updated_at: now,
+      });
+    }
+    positionsAccepted = await replacePositions(env.DB, rows);
   }
   return jsonResponse({
-    schema: 1,
-    asof: market?.updated_at ?? nowShanghai(),
-    status: snapshot["asof"] ? "ok" : "empty",
+    schema: SCHEMA_VERSION,
+    ok: true,
+    accepted: totalAsset !== null ? 1 : 0,
+    positions: positionsAccepted,
+    deprecated: totalAsset === null && positionsRaw === null,
+  });
+}
+
+/** GET /api/account /api/positions /api/orders：轻量表直接读取。 */
+async function handleAccountGet(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const account = await queryLatestAccount(env.DB);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, account, updated_at: account?.asof ?? null, degraded: account === null });
+}
+
+async function handlePositionsGet(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const items = await queryPositions(env.DB);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, count: items.length, items });
+}
+
+async function handleOrdersGet(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const limitRaw = Number(url.searchParams.get("limit") ?? "50");
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200) : 50;
+  const items = await queryOrders(env.DB, limit);
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, count: items.length, items });
+}
+
+async function handleSignalLogGet(request: Request, env: Env, url: URL): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
+  const limitRaw = Number(url.searchParams.get("limit") ?? "200");
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 500) : 200;
+  const latest = ["1", "true"].includes((url.searchParams.get("latest") ?? "").toLowerCase());
+  const symbols = (url.searchParams.get("symbols") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const { items, updated_at } = await querySignalLog(env.DB, { limit, symbols, latest });
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, count: items.length, items, updated_at });
+}
+
+// ------------------------------------------------- 空态兼容接口（已删大表） ----
+
+async function handleEvents(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    items: [],
+    updated_at: null,
+    degraded: true,
+    note: "事件大表已在 0009 迁移删除；事件数据改由本地/GitHub Actions 生成或 AI 语义分析",
+  });
+}
+
+async function handleRegime(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    snapshot: null,
+    updated_at: null,
+    degraded: true,
+    note: "regime 大表已删除；云端以 /api/market-overview 的指数/宽度/主板块实时数据为准",
+  });
+}
+
+async function handleSummaryLatest(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    midday: null,
+    close: null,
+    updated_at: null,
+    degraded: true,
+    note: "午评/收评改由前端基于 market-overview 或 /api/ai/insight 生成",
+  });
+}
+
+async function handleSummaries(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, count: 0, items: [], updated_at: null, degraded: true });
+}
+
+async function handleMarketHistory(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, count: 0, items: [], updated_at: null, degraded: true });
+}
+
+async function handleBacktest(request: Request, env: Env): Promise<Response> {
+  const guard = await requireChallenge(request, env);
+  if (guard) return guard;
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    snapshot: null,
+    updated_at: null,
+    degraded: true,
+    note: "历史回测由本地训练管道生成，云端轻量库不再存储",
+  });
+}
+
+/** GET /api/public/summary：公开市场摘要（供嵌入/首页轻量展示）。 */
+async function handlePublicSummary(): Promise<Response> {
+  const overview = await buildMarketOverview({});
+  const legacy = toLegacyMarketSnapshot(overview);
+  const sentiment = (legacy["sentiment"] ?? {}) as Record<string, unknown>;
+  const indices = Array.isArray(legacy["indices"]) ? (legacy["indices"] as Array<Record<string, unknown>>) : [];
+  const marketDirection = (legacy["market_direction"] ?? {}) as Record<string, unknown>;
+  return jsonResponse({
+    schema: SCHEMA_VERSION,
+    ok: true,
+    asof: overview["asof"],
+    trade_date: overview["trade_date"],
+    session: overview["session"],
+    status: String(overview["quality"] && (overview["quality"] as Record<string, unknown>)["degraded"] ? "partial" : "ok"),
     market: {
       indices: indices.map((item) => ({
         code: item["code"],
@@ -637,345 +1023,9 @@ async function handlePublicSummary(env: Env): Promise<Response> {
         direction: item["direction"],
       })),
       sentiment: { score: sentiment["score"], label: sentiment["label"], breadth: sentiment["breadth"] },
-      market_direction: direction,
+      market_direction: marketDirection,
     },
-    advice: {
-      state,
-      label,
-      position_range: range,
-      rationale: `情绪 ${score} · 指数方向 ${dir}`,
-      disclaimer: "研究用途，不构成投资建议",
-    },
-    events: events.map((item) => ({
-      title: item["title"],
-      label: item["label"],
-      sentiment: item["sentiment"],
-      published_at: item["published_at"],
-    })),
-  });
-}
-
-// ---------------------------------------------------------------- market ----
-
-/** POST /api/market/refresh：手动触发盘中刷新（x-ingest-token 保护，防滥用）。 */
-async function handleMarketRefresh(request: Request, env: Env): Promise<Response> {
-  const token = readIngestToken(env);
-  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
-  const got = extractIngestToken(request);
-  if (!got || !timingSafeEqual(got, token)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
-  }
-  const result = await refreshMarketLive(env, true);
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: result.ok, reason: result.reason ?? null }, 200);
-}
-
-/** POST /api/market/ingest：本地推送市场整体快照（x-ingest-token 鉴权）。 */
-async function handleMarketIngest(request: Request, env: Env): Promise<Response> {
-  const token = readIngestToken(env);
-  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const got = extractIngestToken(request);
-  if (!got || !timingSafeEqual(got, token)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
-  }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
-  }
-  const raw = body as Record<string, unknown> | null;
-  const snapshot = raw && typeof raw["snapshot"] === "object" && raw["snapshot"] !== null ? raw["snapshot"] : raw;
-  if (!snapshot || typeof snapshot !== "object") {
-    return errorResponse(400, "invalid_body", "缺少市场快照内容");
-  }
-  const saved = await insertMarketSnapshot(env.DB, snapshot as Record<string, unknown>);
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1, asof: saved.asof });
-}
-
-/** GET /api/market：最新市场整体快照（人机验证 / 可信 IP）。 */
-async function handleMarket(request: Request, env: Env): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const latest = await queryLatestMarket(env.DB);
-  if (!latest) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: true, snapshot: null, updated_at: null }, 200);
-  }
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    snapshot: latest.snapshot,
-    updated_at: latest.updated_at,
-  });
-}
-
-// ------------------------------------- 盘中分时 / 市场历史 / 板块 / 摘要 ----
-
-/** GET /api/intraday?code=sh000001：指数当日分时（Worker Cron 每 5 分钟覆盖写 intraday_index）。 */
-async function handleIntraday(request: Request, env: Env, url: URL): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const code = (url.searchParams.get("code") ?? "sh000001").trim();
-  if (!/^(sh|sz)\d{6}$/.test(code)) return errorResponse(400, "invalid_code", "code 需形如 sh000001 / sz399001");
-  const row = await queryIntradayIndex(env.DB, code);
-  const today = nowShanghai().slice(0, 10);
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    code,
-    trade_date: row ? row.trade_date : null,
-    updated_at: row ? row.updated_at : null,
-    stale: row ? row.trade_date !== today : true,
-    data: row ? row.payload : null,
-  });
-}
-
-/** GET /api/market/history?date=2026-11-24：某交易日市场快照序列（按 asof 升序，盘中情绪曲线）。 */
-async function handleMarketHistory(request: Request, env: Env, url: URL): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const date = (url.searchParams.get("date") ?? nowShanghai().slice(0, 10)).trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return errorResponse(400, "invalid_date", "date 需形如 2026-11-24");
-  const limitRaw = Number(url.searchParams.get("limit") ?? "120");
-  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 240) : 120;
-  const items = await queryMarketHistory(env.DB, date, limit);
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    date,
-    count: items.length,
-    items,
-    updated_at: items.length > 0 ? items[items.length - 1].asof : null,
-  });
-}
-
-/** GET /api/boards?type=industry|concept&limit=20：板块行情榜（Worker Cron 收盘同步写入）。 */
-async function handleBoards(request: Request, env: Env, url: URL): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const type = (url.searchParams.get("type") ?? "").trim();
-  if (type && !["industry", "concept"].includes(type)) {
-    return errorResponse(400, "invalid_type", "type 只支持 industry / concept");
-  }
-  const limitRaw = Number(url.searchParams.get("limit") ?? "20");
-  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200) : 20;
-  const items = await queryBoards(env.DB, { type: type || undefined, limit });
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    type: type || "all",
-    count: items.length,
-    items,
-    updated_at: items.length > 0 ? items[0].updated_at : null,
-  });
-}
-
-/** GET /api/summary/latest：最近一条午评 + 最近一条收评。 */
-async function handleSummaryLatest(request: Request, env: Env): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const latest = await queryLatestSummaries(env.DB);
-  const updatedAt = (latest.close?.["asof"] as string | undefined) ?? (latest.midday?.["asof"] as string | undefined) ?? null;
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, midday: latest.midday, close: latest.close, updated_at: updatedAt });
-}
-
-/** GET /api/summaries?limit=20：午评/收评列表（时间倒序）。 */
-async function handleSummaries(request: Request, env: Env, url: URL): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const limitRaw = Number(url.searchParams.get("limit") ?? "20");
-  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 100) : 20;
-  const items = await queryMarketSummaries(env.DB, limit);
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    count: items.length,
-    items,
-    updated_at: items.length > 0 ? (items[0]["asof"] as string) : null,
-  });
-}
-
-/** POST /api/daily-sync：手动触发收盘同步 / 午评 / 收评（x-ingest-token 保护）。 */
-async function handleDailySync(request: Request, env: Env, url: URL): Promise<Response> {
-  const token = readIngestToken(env);
-  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
-  const got = extractIngestToken(request);
-  if (!got || !timingSafeEqual(got, token)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
-  }
-  let mode = (url.searchParams.get("session") ?? "").trim();
-  if (!mode) {
-    try {
-      const body = (await request.json()) as Record<string, unknown> | null;
-      const raw = body?.["session"] ?? body?.["mode"];
-      if (typeof raw === "string") mode = raw.trim();
-    } catch {
-      // 无 body 时默认 all
-    }
-  }
-  if (!mode) mode = "all";
-  if (!["all", "close", "midday", "intraday"].includes(mode)) {
-    return errorResponse(400, "invalid_mode", "session 只支持 all / close / midday / intraday");
-  }
-  const result = await runManualDailySync(env, mode as "all" | "close" | "midday" | "intraday");
-  return jsonResponse(result);
-}
-
-// ------------------------------------------------------------------ kline ----
-
-/** 单次推送最多行数（控制请求体大小；本地按 200 行/批推送）。 */
-const KLINE_INGEST_MAX_ROWS = 2000;
-/** GET 单次最多返回根数（任务要求 ≤250）。 */
-const KLINE_QUERY_MAX_ROWS = 250;
-
-function asKlineNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-/** POST /api/kline/ingest：本地批量推送日线（x-ingest-token 鉴权，幂等 upsert）。 */
-async function handleKlineIngest(request: Request, env: Env): Promise<Response> {
-  const token = readIngestToken(env);
-  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const got = extractIngestToken(request);
-  if (!got || !timingSafeEqual(got, token)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
-  }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
-  }
-  const rawItems = Array.isArray(body)
-    ? body
-    : (body as { items?: unknown } | null)?.items;
-  if (!Array.isArray(rawItems)) return errorResponse(400, "invalid_body", "缺少 items");
-  if (rawItems.length > KLINE_INGEST_MAX_ROWS) {
-    return errorResponse(400, "too_many_rows", `单次最多 ${KLINE_INGEST_MAX_ROWS} 行`);
-  }
-  const rows: KlineRow[] = [];
-  let skipped = 0;
-  for (const item of rawItems) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      skipped += 1;
-      continue;
-    }
-    const obj = item as Record<string, unknown>;
-    const symbol = typeof obj["symbol"] === "string" ? obj["symbol"].trim() : "";
-    const tradeDate = typeof obj["trade_date"] === "string" ? obj["trade_date"].trim() : "";
-    const close = asKlineNumber(obj["close"]);
-    if (!/^\d{6}$/.test(symbol) || !/^\d{4}-\d{2}-\d{2}$/.test(tradeDate) || close === null) {
-      skipped += 1;
-      continue;
-    }
-    rows.push({
-      symbol,
-      trade_date: tradeDate,
-      open: asKlineNumber(obj["open"]),
-      high: asKlineNumber(obj["high"]),
-      low: asKlineNumber(obj["low"]),
-      close,
-      volume: asKlineNumber(obj["volume"]),
-      amount: asKlineNumber(obj["amount"]),
-    });
-  }
-  const accepted = await upsertKlines(env.DB, rows);
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted, skipped });
-}
-
-/** GET /api/kline?symbol=600519&limit=120：最近日线（人机验证 / 可信 IP）。 */
-async function handleKline(request: Request, env: Env, url: URL): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const symbol = (url.searchParams.get("symbol") ?? "").trim().toLowerCase();
-  const isIndex = /^(sh|sz)\d{6}$/.test(symbol);
-  if (!isIndex && !/^\d{6}$/.test(symbol)) {
-    return errorResponse(400, "invalid_symbol", "请输入 6 位股票代码或指数代码");
-  }
-  const limitRaw = Number(url.searchParams.get("limit") ?? url.searchParams.get("days") ?? "120");
-  const limit = Number.isFinite(limitRaw)
-    ? Math.min(Math.max(Math.trunc(limitRaw), 1), KLINE_QUERY_MAX_ROWS)
-    : 120;
-  if (isIndex) {
-    const live = await fetchIndexKline(symbol, limit);
-    if (!live) return errorResponse(404, "index_kline_unavailable", "该指数暂无日线数据，请稍后重试");
-    return jsonResponse({
-      schema: SCHEMA_VERSION,
-      ok: true,
-      symbol,
-      name: live.name,
-      kind: "index",
-      limit,
-      count: live.items.length,
-      items: live.items,
-      updated_at: nowShanghai(),
-    });
-  }
-  const items = await queryKlines(env.DB, symbol, limit);
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    symbol,
-    limit,
-    count: items.length,
-    items,
-    updated_at: nowShanghai(),
-  });
-}
-
-// ----------------------------------------------------------------- regime ----
-
-/** POST /api/regime/ingest：本地推送大盘状态快照（x-ingest-token 鉴权）。 */
-async function handleRegimeIngest(request: Request, env: Env): Promise<Response> {
-  const token = readIngestToken(env);
-  if (!token) return errorResponse(503, "server_misconfigured", "服务暂不可用，请稍后重试");
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const got = extractIngestToken(request);
-  if (!got || !timingSafeEqual(got, token)) {
-    return jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401);
-  }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return errorResponse(400, "invalid_json", "请求体不是合法 JSON");
-  }
-  const raw = body as Record<string, unknown> | null;
-  const snapshot =
-    raw && typeof raw["snapshot"] === "object" && raw["snapshot"] !== null ? raw["snapshot"] : raw;
-  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
-    return errorResponse(400, "invalid_body", "缺少大盘状态快照内容");
-  }
-  const saved = await insertJsonSnapshot(env.DB, "regime_snapshots", snapshot as Record<string, unknown>);
-  const state = (snapshot as Record<string, unknown>)["market_state"];
-  const label = state && typeof state === "object" ? (state as Record<string, unknown>)["label"] : null;
-  return jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1, asof: saved.asof, state: label ?? null });
-}
-
-/** GET /api/regime：最新大盘状态快照（人机验证 / 可信 IP）。 */
-async function handleRegime(request: Request, env: Env): Promise<Response> {
-  const guard = await requireChallenge(request, env);
-  if (guard) return guard;
-  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  const snapshot = await queryLatestJsonSnapshot(env.DB, "regime_snapshots");
-  return jsonResponse({
-    schema: SCHEMA_VERSION,
-    ok: true,
-    snapshot,
-    updated_at: snapshot ? nowShanghai() : null,
+    disclaimer: "研究用途，不构成投资建议",
   });
 }
 
@@ -1001,9 +1051,7 @@ function handleStream(request: Request, env: Env): Response {
     lifetimeTimer = null;
   };
 
-  if (!env.DB) {
-    return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
-  }
+  if (!env.DB) return errorResponse(503, "data_unavailable", "数据读取失败，请稍后重试");
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -1018,23 +1066,21 @@ function handleStream(request: Request, env: Env): Response {
       const emit = (event: string, data: unknown, id?: string) => {
         push(`${id ? `id: ${id}\n` : ""}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       };
-
       const poll = async () => {
         if (closed || busy) return;
         busy = true;
         try {
-          const { items, updated_at } = await querySignals(env.DB, { limit: 50 });
+          const { items, updated_at } = await querySignalLog(env.DB, { limit: 50 });
           const signature = `${updated_at ?? ""}|${items.length}|${items[0]?.signal_id ?? ""}`;
           if (signature === lastSignature) return;
           lastSignature = signature;
           emit("signals", { schema: SCHEMA_VERSION, items, updated_at, heartbeat_sec: SSE_HEARTBEAT_MS / 1000 }, updated_at ?? undefined);
         } catch (err) {
-          emit("error", { schema: SCHEMA_VERSION, error: "query_failed", message: "数据读取失败，请稍后重试", now: nowShanghai() });
+          emit("error", { schema: SCHEMA_VERSION, error: "query_failed", message: err instanceof Error ? err.message : String(err), now: nowShanghai() });
         } finally {
           busy = false;
         }
       };
-
       emit("hello", {
         schema: SCHEMA_VERSION,
         service: SERVICE,
@@ -1044,7 +1090,6 @@ function handleStream(request: Request, env: Env): Response {
         now: nowShanghai(),
       });
       void poll();
-
       heartbeatTimer = setInterval(() => push(`: heartbeat ${nowShanghai()}\n\n`), SSE_HEARTBEAT_MS);
       pollTimer = setInterval(() => {
         void poll();
@@ -1085,10 +1130,6 @@ function handleStream(request: Request, env: Env): Response {
 
 // ---------------------------------------------------------------- static ----
 
-/**
- * 静态资源：Pages 产物由 frontend-dev 写在 cloudflare/pages/，通过 wrangler.toml [assets] 挂载。
- * 本地 dev 若 pages/ 目录还空着（或没有 ASSETS binding），返回提示 JSON。
- */
 async function handleStatic(request: Request, env: Env, path: string): Promise<Response> {
   if (env.ASSETS) {
     try {
@@ -1103,15 +1144,18 @@ async function handleStatic(request: Request, env: Env, path: string): Promise<R
       schema: SCHEMA_VERSION,
       ok: true,
       service: SERVICE,
-      message: "页面资源暂不可用，请稍后重试。",
+      message: "Worker 已启动；静态看板产物尚未提供（cloudflare/pages/ 由 frontend-dev 产出）。",
       api: {
         config: "GET /api/config",
         verify: "POST /api/verify",
         health: "GET /api/health",
+        overview: "GET /api/market-overview",
+        market: "GET /api/market",
+        kline: "GET /api/kline?symbol=600519",
+        intraday: "GET /api/intraday?code=sh000001",
         signals: "GET /api/signals",
         stream: "GET /api/stream",
-        ingest: "POST /api/ingest",
-        model: "GET /api/model",
+        ai: "GET /api/ai/insight",
       },
     });
   }
@@ -1120,7 +1164,6 @@ async function handleStatic(request: Request, env: Env, path: string): Promise<R
 
 // ---------------------------------------------------------------- router ----
 
-/** 预检：只允许同源。 */
 function handlePreflight(request: Request): Response {
   const origin = checkSameOrigin(request);
   if (!origin.ok) return errorResponse(403, "cross_origin_forbidden", "只允许同源请求");
@@ -1137,18 +1180,15 @@ function handlePreflight(request: Request): Response {
 }
 
 /**
- * 安全门（在路由前执行）：
- *   1) 机器接口 POST /api/ingest 只认 token，不受人机验证限制；
- *   2) 人机验证：/api/signals、/api/stream、/api/model 需要 quant_pass cookie
- *      （Turnstile siteverify 通过后签发）；未验证返回 401 + challenge:true；
- *   3) 限流（按 IP 每分钟 N 次，默认 120）-> 429 + Retry-After。
- * 注：UA/Accept 黑名单已按用户要求取消（不误伤正常浏览器），
- *     边缘防护请在「自定义域名 + Cloudflare 免费套餐 WAF/Bot Fight Mode」层配置。
+ * 安全门：
+ * - 机器接口（POST /api/ingest、/api/daily-sync、/api/<name>/ingest）只认 token，不做 UA/Accept 反爬；
+ * - 其余请求：UA 黑名单 / Accept / 同源 Origin -> 403；限流 -> 429；
+ * - 人机验证在具体数据路由（cachedRoute / requireChallenge）里执行。
  */
 async function securityGate(request: Request, env: Env, path: string): Promise<Response | null> {
-  // 可信 IP 白名单：免人机验证与限流（开发测试/自动化验收，见 env.TRUSTED_IPS）
-  if (isTrustedIp(request, env)) return null;
-  const isMachineIngest = (path === "/api/ingest" || path === "/api/daily-sync") && request.method === "POST";
+  const isMachineIngest =
+    request.method === "POST" &&
+    (path === "/api/ingest" || path === "/api/daily-sync" || /^\/api\/[a-z][a-z0-9-]*\/ingest$/.test(path));
   if (!isMachineIngest) {
     const ua = checkUserAgent(request);
     if (!ua.ok) return forbiddenClient(ua.reason ?? "forbidden_user_agent", ua.message ?? "User-Agent 被拒绝");
@@ -1163,7 +1203,6 @@ async function securityGate(request: Request, env: Env, path: string): Promise<R
 }
 
 export default {
-  /** Cron 触发：盘中刷新市场快照（写 D1，Pages 前端读取） */
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {
@@ -1176,6 +1215,7 @@ export default {
       })(),
     );
   },
+
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url);
@@ -1186,222 +1226,164 @@ export default {
       const blocked = await securityGate(request, env, path);
       if (blocked) return applySecurityHeaders(blocked);
 
-      if (path === "/api/me") {
-        const guard = methodGuard(request, ["GET"]);
+      const routeWithGuard = async (allow: string[], fn: () => Promise<Response>): Promise<Response> => {
+        const guard = methodGuard(request, allow);
         if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(handleMe(request, env));
-      }
-      if (path === "/api/config") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(handleConfig(env));
-      }
-      if (path === "/api/verify") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleVerify(request, env));
-      }
-      if (path === "/api/health") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleHealth(env));
-      }
+        return applySecurityHeaders(await fn());
+      };
 
+      // --- 公开/安全 ---
+      if (path === "/api/me") {
+        return routeWithGuard(["GET"], async () =>
+          jsonResponse({
+            schema: SCHEMA_VERSION,
+            ok: true,
+            ip: clientIp(request),
+            trusted: isTrustedIp(request, env),
+            challenge_required: !isTrustedIp(request, env),
+          }),
+        );
+      }
+      if (path === "/api/config") return routeWithGuard(["GET"], async () => handleConfig(env));
+      if (path === "/api/verify") return routeWithGuard(["POST"], async () => handleVerify(request, env));
+      if (path === "/api/health") return routeWithGuard(["GET"], async () => handleHealth(env));
+
+      // --- 数据接口（challenge + 边缘缓存） ---
       if (path === "/api/model") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        const challenge = await requireChallenge(request, env);
-        return applySecurityHeaders(challenge ?? handleModel());
+        return routeWithGuard(["GET"], async () =>
+          applySecurityHeaders((await requireChallenge(request, env)) ?? handleModel()),
+        );
       }
       if (path === "/api/signals") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        const challenge = await requireChallenge(request, env);
-        if (challenge) return applySecurityHeaders(challenge);
-        return applySecurityHeaders(await handleSignals(env, url));
+        return routeWithGuard(["GET"], async () => cachedRoute(request, env, 60, () => handleSignals(env, url)));
+      }
+      if (path === "/api/signal-log") {
+        return routeWithGuard(["GET"], async () => cachedRoute(request, env, 60, () => handleSignalLogGet(request, env, url)));
       }
       if (path === "/api/stream") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        const challenge = await requireChallenge(request, env);
-        if (challenge) return applySecurityHeaders(challenge);
-        return applySecurityHeaders(handleStream(request, env));
+        return routeWithGuard(["GET"], async () => (await requireChallenge(request, env)) ?? handleStream(request, env));
       }
-      if (path === "/api/stock") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleStock(request, env, url));
-      }
-      if (path === "/api/search") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
+      if (path === "/api/stock") return routeWithGuard(["GET"], async () => handleStock(request, env, url));
+      if (path === "/api/search") return routeWithGuard(["GET"], async () => {
         const challenge = await requireChallenge(request, env);
-        if (challenge) return applySecurityHeaders(challenge);
+        if (challenge) return challenge;
         const q = (url.searchParams.get("q") ?? "").trim();
-        if (!q) return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, query: q, items: [] }));
-        if (q.length > 24) return applySecurityHeaders(errorResponse(400, "invalid_query", "搜索关键词过长"));
+        if (!q) return jsonResponse({ schema: SCHEMA_VERSION, ok: true, query: q, items: [] });
+        if (q.length > 24) return errorResponse(400, "invalid_query", "搜索关键词过长");
         const limitRaw = Number(url.searchParams.get("limit") ?? "12");
         const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 30) : 12;
         const items = await searchStocks(env, q, limit);
-        return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, query: q, items }));
-      }
-      if (path === "/api/stock-names/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleStockNamesIngest(request, env));
-      }
-      if (path === "/api/public/summary") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handlePublicSummary(env));
-      }
-      if (path === "/api/events") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleEvents(request, env, url)));
-      }
-      if (path === "/api/events/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleEventsIngest(request, env));
-      }
-      if (path === "/api/backtest") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleSnapshotGet(request, env, "backtest_reports"));
-      }
-      if (path === "/api/backtest/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleSnapshotIngest(request, env, "backtest_reports"));
-      }
-      if (path === "/api/paper") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleSnapshotGet(request, env, "paper_snapshots"));
-      }
-      if (path === "/api/paper/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleSnapshotIngest(request, env, "paper_snapshots"));
-      }
-      if (path === "/api/kline") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleKline(request, env, url)));
-      }
-      if (path === "/api/kline/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleKlineIngest(request, env));
-      }
-      if (path === "/api/regime") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleRegime(request, env)));
-      }
-      if (path === "/api/regime/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleRegimeIngest(request, env));
-      }
-      if (path === "/api/market/refresh") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleMarketRefresh(request, env));
+        return jsonResponse({ schema: SCHEMA_VERSION, ok: true, query: q, items });
+      });
+
+      // --- 市场全景 / 兼容 / 板块 / 分时 / K线 ---
+      if (path === "/api/market-overview") {
+        return routeWithGuard(["GET"], async () =>
+          cachedRoute(request, env, 60, () => handleMarketOverview(request, env, url), cacheDecorate(60)),
+        );
       }
       if (path === "/api/market") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleMarket(request, env)));
-      }
-      if (path === "/api/market/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleMarketIngest(request, env));
-      }
-      if (path === "/api/intraday") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await cachedRoute(request, env, 30, () => handleIntraday(request, env, url)));
-      }
-      if (path === "/api/market/history") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await cachedRoute(request, env, 120, () => handleMarketHistory(request, env, url)));
+        return routeWithGuard(["GET"], async () =>
+          cachedRoute(request, env, 60, () => handleMarket(), cacheDecorate(60)),
+        );
       }
       if (path === "/api/boards") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await cachedRoute(request, env, 120, () => handleBoards(request, env, url)));
+        return routeWithGuard(["GET"], async () => cachedRoute(request, env, 120, () => handleBoards(url)));
       }
+      if (path === "/api/intraday") {
+        return routeWithGuard(["GET"], async () => cachedRoute(request, env, 30, () => handleIntraday(url)));
+      }
+      if (path === "/api/market/history") {
+        return routeWithGuard(["GET"], async () => cachedRoute(request, env, 120, () => handleMarketHistory(request, env)));
+      }
+      if (path === "/api/kline") {
+        return routeWithGuard(["GET"], async () => cachedRoute(request, env, 60, () => klineHandler(url)));
+      }
+
+      // --- 模拟盘 / 轻量表 ---
+      if (path === "/api/paper") return routeWithGuard(["GET"], async () => handlePaper(request, env));
+      if (path === "/api/account") return routeWithGuard(["GET"], async () => handleAccountGet(request, env));
+      if (path === "/api/positions") return routeWithGuard(["GET"], async () => handlePositionsGet(request, env));
+      if (path === "/api/orders") return routeWithGuard(["GET"], async () => handleOrdersGet(request, env, url));
+
+      // --- 空态兼容（大表已删） ---
+      if (path === "/api/events") return routeWithGuard(["GET"], async () => cachedRoute(request, env, 60, () => handleEvents(request, env)));
+      if (path === "/api/regime") return routeWithGuard(["GET"], async () => cachedRoute(request, env, 60, () => handleRegime(request, env)));
+      if (path === "/api/summary/latest") {
+        return routeWithGuard(["GET"], async () => cachedRoute(request, env, 60, () => handleSummaryLatest(request, env)));
+      }
+      if (path === "/api/summaries") return routeWithGuard(["GET"], async () => handleSummaries(request, env));
+      if (path === "/api/backtest") return routeWithGuard(["GET"], async () => handleBacktest(request, env));
+      if (path === "/api/public/summary") {
+        return routeWithGuard(["GET"], async () => cachedRoute(request, env, 60, () => handlePublicSummary()));
+      }
+
+      // --- AI ---
       if (path === "/api/ai/insight") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        const challengeGuard = await requireChallenge(request, env);
-        if (challengeGuard) return applySecurityHeaders(challengeGuard);
-        const insight = await getAiInsight(env);
-        if (!insight) {
-          return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: false, message: "AI 洞察尚未生成" }, 404));
-        }
-        return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, insight, updated_at: insight.generated_at }));
+        return routeWithGuard(["GET"], async () => {
+          const challenge = await requireChallenge(request, env);
+          if (challenge) return challenge;
+          const insight = await getAiInsight(env);
+          if (!insight) return jsonResponse({ schema: SCHEMA_VERSION, ok: false, message: "AI 洞察尚未生成" }, 404);
+          return jsonResponse({ schema: SCHEMA_VERSION, ok: true, insight, updated_at: insight.generated_at });
+        });
       }
       if (path === "/api/ai/generate") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        const token = readIngestToken(env);
-        const got = extractIngestToken(request);
-        if (!token || !got || !timingSafeEqual(got, token)) {
-          return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401));
-        }
-        try {
-          const insight = await generateAiInsight(env, true);
-          return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, insight }));
-        } catch {
-          return applySecurityHeaders(errorResponse(503, "ai_unavailable", "AI 服务暂不可用，请稍后重试"));
-        }
+        return routeWithGuard(["POST"], async () => {
+          const auth = requireMachineToken(request, env);
+          if (auth) return auth;
+          try {
+            const insight = await generateAiInsight(env, true);
+            return jsonResponse({ schema: SCHEMA_VERSION, ok: true, insight });
+          } catch {
+            return errorResponse(503, "ai_unavailable", "AI 服务暂不可用，请稍后重试");
+          }
+        });
       }
-      if (path === "/api/ai/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        const token = readIngestToken(env);
-        const got = extractIngestToken(request);
-        if (!token || !got || !timingSafeEqual(got, token)) {
-          return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: false, error: "unauthorized", message: "请求未授权" }, 401));
-        }
-        let body: unknown;
-        try {
-          body = await request.json();
-        } catch {
-          return applySecurityHeaders(errorResponse(400, "invalid_json", "请求体不是合法 JSON"));
-        }
-        const raw = body as Record<string, unknown> | null;
-        const insight = (raw && typeof raw["insight"] === "object" && raw["insight"] !== null ? raw["insight"] : raw) as unknown as AiInsight;
-        if (!insight || typeof insight !== "object") {
-          return applySecurityHeaders(errorResponse(400, "invalid_body", "缺少 AI 报告内容"));
-        }
-        await ingestAiInsight(insight, env);
-        return applySecurityHeaders(jsonResponse({ schema: SCHEMA_VERSION, ok: true, accepted: 1 }));
-      }
-      if (path === "/api/summary/latest") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await cachedRoute(request, env, 60, () => handleSummaryLatest(request, env)));
-      }
-      if (path === "/api/summaries") {
-        const guard = methodGuard(request, ["GET"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleSummaries(request, env, url));
-      }
+
+      // --- ingest 机器接口 ---
+      if (path === "/api/ingest") return routeWithGuard(["POST"], async () => handleIngest(request, env));
+      if (path === "/api/signal-log/ingest") return routeWithGuard(["POST"], async () => handleSignalLogIngest(request, env));
+      if (path === "/api/account/ingest") return routeWithGuard(["POST"], async () => handleAccountIngest(request, env));
+      if (path === "/api/positions/ingest") return routeWithGuard(["POST"], async () => handlePositionsIngest(request, env));
+      if (path === "/api/orders/ingest") return routeWithGuard(["POST"], async () => handleOrdersIngest(request, env));
+      if (path === "/api/stock-names/ingest") return routeWithGuard(["POST"], async () => handleStockNamesIngest(request, env));
+      if (path === "/api/paper/ingest") return routeWithGuard(["POST"], async () => handlePaperIngest(request, env));
       if (path === "/api/daily-sync") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleDailySync(request, env, url));
+        return routeWithGuard(["POST"], async () => {
+          const auth = requireMachineToken(request, env);
+          if (auth) return auth;
+          let mode = (url.searchParams.get("session") ?? "").trim();
+          if (!mode) {
+            try {
+              const body = (await request.json()) as Record<string, unknown> | null;
+              const raw = body?.["session"] ?? body?.["mode"];
+              if (typeof raw === "string") mode = raw.trim();
+            } catch {
+              /* default all */
+            }
+          }
+          if (!mode) mode = "all";
+          if (!["all", "close", "midday", "intraday"].includes(mode)) {
+            return errorResponse(400, "invalid_mode", "session 只支持 all / close / midday / intraday");
+          }
+          const result = await runManualDailySync(env, mode as "all" | "close" | "midday" | "intraday");
+          return jsonResponse(result);
+        });
       }
-      if (path === "/api/ingest") {
-        const guard = methodGuard(request, ["POST"]);
-        if (guard) return applySecurityHeaders(guard);
-        return applySecurityHeaders(await handleIngest(request, env));
+      // 已废弃的旧 ingest：200 兼容响应，避免旧脚本 500
+      if (path === "/api/kline/ingest") return routeWithGuard(["POST"], async () => deprecatedIngest("K 线入库", "云端改实时 /api/kline，不再落 D1"));
+      if (path === "/api/market/ingest") return routeWithGuard(["POST"], async () => deprecatedIngest("市场快照入库", "市场全景改 /api/market-overview 实时+缓存"));
+      if (path === "/api/regime/ingest") return routeWithGuard(["POST"], async () => deprecatedIngest("regime 入库", "regime 表已删除，改 /api/market-overview"));
+      if (path === "/api/events/ingest") return routeWithGuard(["POST"], async () => deprecatedIngest("事件入库", "事件表已删除，事件数据改本地/GitHub Actions 或 AI"));
+      if (path === "/api/backtest/ingest") return routeWithGuard(["POST"], async () => deprecatedIngest("回测入库", "回测由本地训练管道产出，云端不再存储"));
+      if (path === "/api/market/refresh") {
+        return routeWithGuard(["POST"], async () => {
+          const auth = requireMachineToken(request, env);
+          if (auth) return auth;
+          const result = await refreshMarketLive(env, true);
+          return jsonResponse({ schema: SCHEMA_VERSION, ok: result.ok, reason: result.reason ?? null });
+        });
       }
 
       if (path.startsWith("/api/")) {
