@@ -21,3 +21,10 @@ cloudflare/worker/wrangler.local.toml
 cloudflare/worker/.dev.vars
 cloudflare/pages/.wrangler/
 data/parquet/
+
+# Kaggle TPU 训练产物（内核目录/下载缓存/本地输出）
+training/tpu/kaggle_dataset/
+training/tpu/kaggle_out/
+training/tpu/kernel_main/
+training/tpu/kernel_probe/
+training/tpu/out/

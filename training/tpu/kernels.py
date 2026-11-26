@@ -160,37 +160,94 @@ import tensorflow as tf
 print("TensorFlow", tf.__version__)
 """),
         _cell("code", """
-import os, subprocess
+import glob, os, shutil, subprocess
 
-REPO_DIR = "/kaggle/working/personal-quant"
+WORK = "/kaggle/working/personal-quant"
 REPO_URL = "https://github.com/xiongkong520/personal-quant.git"
-if not os.path.isdir(REPO_DIR):
-    subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO_DIR], check=True)
-os.chdir(REPO_DIR)
-print(subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True).stdout)
+
+def _copy(src, dst_dir, name=None):
+    name = name or os.path.basename(src)
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = os.path.join(dst_dir, name)
+    if os.path.abspath(src) != os.path.abspath(dst):
+        shutil.copy(src, dst)
+    print("  ", src, "->", dst, flush=True)
+
+ds_dirs = sorted({os.path.dirname(p) for p in glob.glob("/kaggle/input/*/nn_tf.py")})
+if ds_dirs:
+    ds = ds_dirs[0]
+    print("代码/数据来自 Kaggle Dataset:", ds, flush=True)
+    for name in ("nn_core.py", "nn_tf.py"):
+        _copy(os.path.join(ds, name), os.path.join(WORK, "training", "tpu"))
+    if os.path.exists(os.path.join(ds, "train_lgbm.py")):
+        _copy(os.path.join(ds, "train_lgbm.py"), os.path.join(WORK, "training"))
+    for name in ("daily.parquet", "index.parquet", "zt_pool.parquet"):
+        src = os.path.join(ds, name)
+        if os.path.exists(src):
+            _copy(src, os.path.join(WORK, "training", "data"))
+else:
+    print("没有挂载数据集，改为从 GitHub 拉仓库（需要 Internet）", flush=True)
+    if not os.path.isdir(WORK):
+        clone = subprocess.run(["git", "clone", "--depth", "1", REPO_URL, WORK],
+                               capture_output=True, text=True)
+        print((clone.stdout or "") + (clone.stderr or ""), flush=True)
+        if clone.returncode != 0:
+            raise RuntimeError("git clone 失败：确认 Kaggle 该笔记本已开启 Internet（账号需手机验证）")
+os.makedirs(os.path.join(WORK, "training", "data"), exist_ok=True)
+os.chdir(WORK)
+print("工作目录:", os.getcwd(), flush=True)
 """),
         _cell("markdown", """
-## 第 1 步：抓数据（近 3 年前复权日线 + 最近 __ZT_DAYS__ 个交易日涨跌停池）
+## 第 1 步：准备数据（近 3 年前复权日线 + 最近 __ZT_DAYS__ 个交易日涨跌停池）
 
-AKShare 首选、Baostock 兜底；两个免费源都连不上时退回 `--synthetic` 合成数据，
-**那样只能验证管道跑得通，指标没有意义**（日志里会明确写 SYNTHETIC / 失败原因）。
+优先级：**挂载的 Kaggle Dataset**（`/kaggle/input/*/daily.parquet`）→ **在线抓取**（AKShare 首选、Baostock 兜底）
+→ `--synthetic` 合成数据（**只验证管道，指标无意义**，日志会写失败原因）。
 """),
         _cell("code", """
-import os, subprocess, sys
+import glob, os, shutil, subprocess, sys
+
+WORK = "/kaggle/working/personal-quant"
+DATA_DIR = os.path.join(WORK, "training", "data")
+DAILY = os.path.join(DATA_DIR, "daily.parquet")
+
+def has(mod):
+    import importlib.util
+    return importlib.util.find_spec(mod) is not None
 
 def run(cmd):
     print("$", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, cwd="/kaggle/working/personal-quant").returncode
+    return subprocess.run(cmd, cwd=WORK).returncode
 
-rc = run([sys.executable, "training/fetch_data.py", "--start", "__START__", "--zt-days", "__ZT_DAYS__"] + __SYMBOLS_ARG__)
-data_ok = os.path.isfile("/kaggle/working/personal-quant/training/data/daily.parquet")
-if rc != 0 or not data_ok:
-    print("⚠ 真实数据抓取失败，退回合成数据（只验证管道，指标无意义）", flush=True)
+if os.path.isfile(DAILY):
+    print("数据已就绪：", sorted(os.listdir(DATA_DIR)), flush=True)
+    rc = 0
+else:
+    mounted = sorted(glob.glob("/kaggle/input/*/daily.parquet"))
+    if mounted:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        for src in mounted:
+            shutil.copy(src, os.path.join(DATA_DIR, os.path.basename(src)))
+            print("从数据集复制", src, flush=True)
+        for src in glob.glob("/kaggle/input/*/index.parquet") + glob.glob("/kaggle/input/*/zt_pool.parquet"):
+            shutil.copy(src, os.path.join(DATA_DIR, os.path.basename(src)))
+            print("从数据集复制", src, flush=True)
+        rc = 0
+    else:
+        for mod in ("akshare", "baostock"):
+            if not has(mod):
+                print("安装", mod, flush=True)
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", mod], check=False)
+        rc = run([sys.executable, "training/fetch_data.py", "--start", "__START__", "--zt-days", "__ZT_DAYS__"] + __SYMBOLS_ARG__)
+
+if not has("lightgbm"):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "lightgbm"], check=False)
+
+if rc != 0 or not os.path.isfile(DAILY):
+    print("⚠ 数据准备失败，退回合成数据（只验证管道，指标无意义）", flush=True)
     run([sys.executable, "training/fetch_data.py", "--synthetic"])
-    os.environ["SYNTHETIC_DATA"] = "1"
 
 import pandas as pd
-d = pd.read_parquet("/kaggle/working/personal-quant/training/data/daily.parquet")
+d = pd.read_parquet(DAILY)
 print("daily=", d.shape, "symbols=", d["symbol"].nunique(), "dates=", d["trade_date"].nunique(),
       "range=", d["trade_date"].min(), "~", d["trade_date"].max())
 """),
@@ -252,7 +309,7 @@ print("产物已打包 /kaggle/working/nn_artifacts.zip")
     return _notebook(cells)
 
 
-def kernel_metadata(user: str, slug: str, title: str, code_file: str) -> dict:
+def kernel_metadata(user: str, slug: str, title: str, code_file: str, datasets: list[str] | None = None) -> dict:
     return {
         "id": f"{user}/{slug}",
         "title": title,
@@ -263,7 +320,7 @@ def kernel_metadata(user: str, slug: str, title: str, code_file: str) -> dict:
         "enable_gpu": False,
         "enable_tpu": True,
         "enable_internet": True,
-        "dataset_sources": [],
+        "dataset_sources": list(datasets or []),
         "competition_sources": [],
         "kernel_sources": [],
         "model_sources": [],
@@ -292,19 +349,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--zt-days", type=int, default=30)
     ap.add_argument("--symbols", default="")
     ap.add_argument("--baseline", action="store_true")
+    ap.add_argument("--dataset", default="", help="挂载的 Kaggle Dataset（形如 user/slug）")
     args = ap.parse_args(argv)
 
     user = args.user or "USERNAME_NOT_SET"
     out = Path(args.out)
+    # 注意：Kaggle 的 slug 由 title 反解得到，title 与 slug 不一致时 push 会 409（或建到别的 slug 下）。
+    # 这里让 title 与 slug 严格对应。
+    titles = {"probe": "Quant TPU env probe", "main": "Quant TPU GRU walk-forward"}
+    slugs = {"probe": "quant-tpu-env-probe", "main": "quant-tpu-gru-walk-forward"}
+    slug = args.slug or slugs[args.mode]
     if args.mode == "probe":
-        slug = args.slug or "quant-tpu-probe"
         nb, code_file = _notebook(PROBE_CELLS), "env_probe.ipynb"
-        meta = kernel_metadata(user, slug, "Quant TPU env probe", code_file)
     else:
-        slug = args.slug or "quant-tpu-gru"
         nb = main_notebook(args.epochs, args.folds, args.baseline, args.seq_len, args.start, args.zt_days, args.symbols)
         code_file = "tpu_nn.ipynb"
-        meta = kernel_metadata(user, slug, "Quant TPU GRU walk-forward", code_file)
+    datasets = [args.dataset] if args.dataset else []
+    meta = kernel_metadata(user, slug, titles[args.mode], code_file, datasets)
     write_kernel(out, nb, meta, code_file)
     print(f"已生成 {out}（id={meta['id']}, enable_tpu={meta['enable_tpu']}）")
     return 0

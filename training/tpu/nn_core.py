@@ -351,6 +351,48 @@ def evaluate_oof(
     return out
 
 
+def auc_score(y_true: np.ndarray, scores: np.ndarray) -> float | None:
+    """ROC AUC（Mann-Whitney U 秩公式；并列分数用平均秩）。"""
+    y = np.asarray(y_true).astype(int)
+    s = np.asarray(scores, dtype=np.float64)
+    if y.sum() == 0 or y.sum() == len(y):
+        return None
+    order = np.argsort(s, kind="mergesort")
+    sorted_scores = s[order]
+    ranks = np.empty(len(s), dtype=np.float64)
+    i = 0
+    while i < len(s):
+        j = i
+        while j + 1 < len(s) and sorted_scores[j + 1] == sorted_scores[i]:
+            j += 1
+        ranks[order[i:j + 1]] = (i + j + 2) / 2.0  # 平均秩（1-based）
+        i = j + 1
+    n1 = int(y.sum())
+    n0 = len(y) - n1
+    return float((ranks[y == 1].sum() - n1 * (n1 + 1) / 2.0) / (n1 * n0))
+
+
+def directional_metrics(meta: pd.DataFrame, proba: np.ndarray) -> dict[str, Any]:
+    """只看"有方向"的样本（|r| > 摩擦成本，即 label != flat）时的方向判别力。
+
+    三分类准确率会被 flat 占比稀释，方向 AUC 更适合衡量"能不能排序"。
+    """
+    labels = meta["label"].to_numpy()
+    mask = labels != "flat"
+    if mask.sum() == 0:
+        return {"n": 0}
+    p = np.asarray(proba, dtype=float)[mask]
+    y_up = (labels[mask] == "up").astype(int)
+    score = p[:, 0] - p[:, 2]          # up 概率 - down 概率，等价于二分类 logit 差
+    pred_up = (score > 0).astype(int)
+    return {
+        "n": int(mask.sum()),
+        "acc": round(float((pred_up == y_up).mean()), 4),
+        "auc": round(auc_score(y_up, score), 4) if auc_score(y_up, score) is not None else None,
+        "base_rate_up": round(float(y_up.mean()), 4),
+    }
+
+
 def class_weights(labels: np.ndarray, n_classes: int = 3, cap: float = 4.0) -> np.ndarray:
     counts = np.bincount(labels, minlength=n_classes).astype(np.float64)
     counts = np.maximum(counts, 1.0)

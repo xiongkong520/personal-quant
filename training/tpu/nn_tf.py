@@ -149,11 +149,12 @@ def make_forward(tf, params: dict, seq_len: int, units: int, dropout: float):
         h = (1-z)*h + z*h'
     """
     W = params["gru_kernel"]
-    U = params["gru_recurrent"]
-    Uz, Ur, Uh = U[:, :units], U[:, units:2 * units], U[:, 2 * units:]
     b = params["gru_bias"]
 
     def gru_forward(x):
+        # 切片必须在 tape 上下文内做，否则梯度回不到 recurrent 变量
+        U = params["gru_recurrent"]
+        Uz, Ur, Uh = U[:, :units], U[:, units:2 * units], U[:, 2 * units:]
         batch = tf.shape(x)[0]
         h = tf.zeros([batch, units], dtype=tf.float32)
         # 先算全部时间步的输入投影（一次大矩阵乘，比每步算更省）
@@ -298,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--label-cost", type=float, default=0.002)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--baseline-lgbm", action="store_true", help="同折跑 LightGBM 基线并做概率融合")
+    ap.add_argument("--no-class-weight", action="store_true", help="不用类别权重（默认给 flat 加权）")
     ap.add_argument("--smoke", action="store_true", help="1 折 1 epoch，快速验证环境")
     args = ap.parse_args(argv)
 
@@ -352,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         norm = core.fit_norm(Xtr_raw)
         Xtr = core.apply_norm(Xtr_raw, norm)
         Xva = core.apply_norm(Xva_raw, norm)
-        wtr = core.class_weights(ytr)[ytr]
+        wtr = np.ones(len(ytr), dtype=np.float32) if args.no_class_weight else core.class_weights(ytr)[ytr]
 
         log(
             f"[fold {fid}] train={len(Xtr)} valid={len(Xva)} "
@@ -400,6 +402,21 @@ def main(argv: list[str] | None = None) -> int:
     meta_valid = seq_meta[valid_mask].reset_index(drop=True)
     probs_valid = oof_probs[valid_mask]
     metrics = core.evaluate_oof(meta_valid, probs_valid, args.label_cost)
+    # 天真基线：永远猜出现最多的那一类。任何"方向模型"的准确率都应该跟它比，而不是跟 1/3 比。
+    dist = meta_valid["label"].value_counts(normalize=True)
+    baselines = {
+        "majority_class": str(dist.index[0]),
+        "majority_acc": round(float(dist.iloc[0]), 4),
+        "class_dist": {str(k): round(float(v), 4) for k, v in dist.items()},
+        "random_acc": 1.0 / 3.0,
+    }
+    log(f"天真基线：多数类 {baselines['majority_class']} 命中 {baselines['majority_acc']}（对照用）")
+    directional = core.directional_metrics(meta_valid, probs_valid)
+    if directional.get("n"):
+        log(
+            f"方向子集（剔除 flat）：n={directional['n']} acc={directional['acc']} "
+            f"AUC={directional['auc']}（基线 0.5 / 正类占比 {directional['base_rate_up']}）"
+        )
 
     # --- 导出 JSON（最后一折权重当线上模型，指标用全折 OOF） ---
     export = core.export_model(
@@ -459,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
         "config": vars(args),
         "folds": fold_logs,
         "walk_forward": metrics,
+        "naive_baselines": baselines,
+        "directional": directional,
         "baseline": baseline,
         "parity_max_abs_diff": parity,
         "model_size_mb": round(model_mb, 3),
@@ -519,6 +538,10 @@ def run_lgbm_baseline(df: pd.DataFrame, meta_valid: pd.DataFrame, probs: np.ndar
         "n": int(len(merged)),
         "nn": core.evaluate_oof(merged, p_nn, args.label_cost),
         "lgbm": core.evaluate_oof(merged, p_lgbm, args.label_cost),
+        "directional": {
+            "nn": core.directional_metrics(merged, p_nn),
+            "lgbm": core.directional_metrics(merged, p_lgbm),
+        },
     }
     best: dict[str, Any] = {"accuracy": -1.0}
     for w in (0.3, 0.4, 0.5, 0.6, 0.7):

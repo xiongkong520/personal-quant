@@ -34,7 +34,7 @@ TPU_DIR = Path(__file__).resolve().parent
 REPO_DIR = TPU_DIR.parent.parent
 KAGGLE_JSON = Path.home() / ".kaggle" / "kaggle.json"
 DEFAULT_DIRS = {"probe": TPU_DIR / "kernel_probe", "main": TPU_DIR / "kernel_main"}
-DEFAULT_SLUGS = {"probe": "quant-tpu-probe", "main": "quant-tpu-gru"}
+DEFAULT_SLUGS = {"probe": "quant-tpu-env-probe", "main": "quant-tpu-gru-walk-forward"}
 
 
 def kaggle(*args: str, timeout: int = 300, check: bool = False) -> subprocess.CompletedProcess:
