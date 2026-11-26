@@ -2417,6 +2417,79 @@
     sec.dataset.page = "dashboard";
     ensurePanoramaSections();
   }
+  var sparkCache = {};
+
+  function drawSpark(canvas, points) {
+    if (!canvas || !points || points.length < 2) return;
+    var dpr = window.devicePixelRatio || 1;
+    var w = canvas.clientWidth || 140;
+    var h = canvas.clientHeight || 34;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+    var values = [];
+    points.forEach(function (pt) {
+      var v = Number(pt.price);
+      if (Number.isFinite(v)) values.push(v);
+    });
+    if (values.length < 2) return;
+    var min = Math.min.apply(null, values);
+    var max = Math.max.apply(null, values);
+    if (max === min) max = min + 1;
+    var pad = 2;
+    var sx = (w - 2) / (values.length - 1);
+    ctx.beginPath();
+    values.forEach(function (v, i) {
+      var x = 1 + i * sx;
+      var y = pad + (h - pad * 2) * (1 - (v - min) / (max - min));
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    var rising = values[values.length - 1] >= values[0];
+    ctx.strokeStyle = rising ? "rgb(239, 109, 119)" : "rgb(74, 214, 138)";
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.lineTo(1 + (values.length - 1) * sx, h - 1);
+    ctx.lineTo(1, h - 1);
+    ctx.closePath();
+    ctx.fillStyle = rising ? "rgba(239,109,119,0.10)" : "rgba(74,214,138,0.10)";
+    ctx.fill();
+  }
+
+  function loadIndexSparks() {
+    var canvases = document.querySelectorAll(".idx-spark");
+    if (!canvases.length) return;
+    getJSON(EP.snapshot, { timeoutMs: 12000 }).then(function (r) {
+      var d = (r && r.data) || {};
+      var indices = d.indices || [];
+      if (!indices.length) throw new Error("empty");
+      var map = {};
+      indices.forEach(function (it) { map[it.code] = it.points; });
+      var painted = 0;
+      canvases.forEach(function (canvas) {
+        var points = map[canvas.getAttribute("data-code")];
+        if (points && points.length > 1) { drawSpark(canvas, points); painted += 1; }
+      });
+      if (!painted) throw new Error("no-points");
+    }).catch(function () {
+      canvases.forEach(function (canvas) {
+        var code = canvas.getAttribute("data-code");
+        if (!code) return;
+        if (sparkCache[code]) { drawSpark(canvas, sparkCache[code]); return; }
+        getJSON(EP.intraday + "?code=" + encodeURIComponent(code), { timeoutMs: 12000 }).then(function (r) {
+          if (!r || r.error || r.challenge || !r.data) return;
+          var data = normIntradayPayload(r.data);
+          if (!data || !data.points || data.points.length < 2) return;
+          sparkCache[code] = data.points;
+          drawSpark(canvas, data.points);
+        }).catch(function () {});
+      });
+    });
+  }
+
+
   function renderMarket(snapshot, updatedAt) {
     var box = $("#mktIndices");
     if (!box) return;
@@ -2436,10 +2509,12 @@
       html += '<div class="idx-card2 ' + cls + '">' +
         '<div class="idx-c2-top"><span class="idx-name">' + esc(it.name) + '</span><span class="idx-dir2 ' + cls + '">' + dir + '</span></div>' +
         '<b class="idx-c2-price num">' + fmtNum(price) + '</b>' +
+        '<canvas class="idx-spark" data-code="' + (it.code ? "sh" + it.code : "") + '" height="34"></canvas>' +
         '<div class="idx-c2-bottom"><span class="num">' + (diff >= 0 ? "+" : "") + fmtNum(diff) + '</span><span class="num">' + (chg > 0 ? "+" : "") + fmtNum(chg) + '%</span></div>' +
       '</div>';
     });
     box.innerHTML = html;
+    void loadIndexSparks();
     var sent = snapshot.sentiment || {};
     setText($("#mktScore"), fmtNum(sent.score, 1));
     var stateEl = $("#mktState");
