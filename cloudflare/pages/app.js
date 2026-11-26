@@ -139,6 +139,85 @@
       '<div class="ph-block"><h3>更新方式</h3><p>盘中数据由 Cloudflare Worker Cron 自动更新；模型与回测由每日任务生成。</p></div>' +
       "</div>");
   }
+  function createMarketAllPanel() {
+    if (document.getElementById("marketAllCard")) return;
+    var marketPage = document.querySelector('[data-page="market"]');
+    if (!marketPage) return;
+    var card = document.createElement("section");
+    card.className = "card";
+    card.id = "marketAllCard";
+    card.dataset.page = "market";
+    card.hidden = true;
+    card.innerHTML = '<div class="card-head"><div><p class="eyebrow">全市场</p><h2>个股行情</h2></div>' +
+      '<span class="card-note" id="marketAllNote">--</span></div>' +
+      '<div class="mkt-all-tools">' +
+      '<input id="marketAllFilter" class="market-all-filter" type="search" placeholder="代码/名称筛选" autocomplete="off" />' +
+      '<select id="marketAllSort" class="market-all-sort"><option value="pct_desc">涨幅降序</option><option value="pct_asc">涨幅升序</option><option value="amount_desc">成交额降序</option><option value="exchange">换手率降序</option></select>' +
+      '</div>' +
+      '<div class="table-wrap market-all-wrap"><table class="table" id="marketAllTable"><thead><tr><th>代码</th><th>名称</th><th class="num">现价</th><th class="num">涨跌幅</th><th class="num">成交额</th><th class="num">换手</th></tr></thead><tbody></tbody></table></div>' +
+      '<div class="market-all-pager"><button type="button" class="ghost" id="marketAllPrev">上一页</button><span id="marketAllPage">1 / 1</span><button type="button" class="ghost" id="marketAllNext">下一页</button><span class="muted" id="marketAllCount"></span></div>';
+    var anchorEl = document.getElementById("klineCard") || document.getElementById("stockResult");
+    if (anchorEl && anchorEl.parentNode) anchorEl.parentNode.insertBefore(card, anchorEl.nextSibling);
+    else marketPage.appendChild(card);
+    var table = card.querySelector("#marketAllTable tbody");
+    var stateAll = { page: 1, size: 50, sort: "pct_desc", filter: "" };
+    function render() {
+      var all = (state.marketAll || []).filter(function (s) {
+        if (!s || !s.symbol) return false;
+        var sym = String(s.symbol);
+        if (sym.indexOf("sz") !== 0 && sym.indexOf("sh") !== 0) return false;
+        if (!stateAll.filter) return true;
+        return String(s.code).indexOf(stateAll.filter) >= 0 || String(s.name).indexOf(stateAll.filter) >= 0;
+      });
+      if (stateAll.sort === "pct_desc") all.sort(function (a, b) { return (b.pct_chg || 0) - (a.pct_chg || 0); });
+      else if (stateAll.sort === "pct_asc") all.sort(function (a, b) { return (a.pct_chg || 0) - (b.pct_chg || 0); });
+      else if (stateAll.sort === "amount_desc") all.sort(function (a, b) { return (b.amount || 0) - (a.amount || 0); });
+      else all.sort(function (a, b) { return (b.turnover || 0) - (a.turnover || 0); });
+      var pages = Math.max(1, Math.ceil(all.length / stateAll.size));
+      if (stateAll.page > pages) stateAll.page = pages;
+      var start = (stateAll.page - 1) * stateAll.size;
+      var rows = all.slice(start, start + stateAll.size);
+      table.innerHTML = rows.map(function (s) {
+        var cls = (s.pct_chg || 0) > 0 ? "up" : ((s.pct_chg || 0) < 0 ? "down" : "flat");
+        var amt = Number(s.amount || 0);
+        var amtText = amt >= 1e8 ? (amt / 1e8).toFixed(2) + "亿" : amt >= 1e4 ? (amt / 1e4).toFixed(0) + "万" : "-";
+        return '<tr class="market-all-row" data-code="' + esc(s.code) + '">' +
+          '<td class="num">' + esc(s.code) + '</td>' +
+          '<td>' + esc(s.name) + '</td>' +
+          '<td class="num">' + fmtNum(s.price) + '</td>' +
+          '<td class="num ' + cls + '">' + ((s.pct_chg || 0) > 0 ? "+" : "") + fmtNum(s.pct_chg) + '%</td>' +
+          '<td class="num muted">' + amtText + '</td>' +
+          '<td class="num muted">' + (s.turnover ? fmtNum(s.turnover) + '%' : "-") + '</td>' +
+        '</tr>';
+      }).join("");
+      var pageEl = card.querySelector("#marketAllPage");
+      if (pageEl) pageEl.textContent = stateAll.page + " / " + pages;
+      var countEl = card.querySelector("#marketAllCount");
+      if (countEl) countEl.textContent = "共 " + all.length + " 只";
+    }
+    function load() {
+      ensureMarketAll().then(function () { render(); });
+    }
+    card.querySelector("#marketAllPrev").addEventListener("click", function () { if (stateAll.page > 1) { stateAll.page -= 1; render(); } });
+    card.querySelector("#marketAllNext").addEventListener("click", function () { stateAll.page += 1; render(); });
+    card.querySelector("#marketAllSort").addEventListener("change", function (ev) { stateAll.sort = ev.target.value; stateAll.page = 1; render(); });
+    var filterEl = card.querySelector("#marketAllFilter");
+    var filterTimer = 0;
+    filterEl.addEventListener("input", function () {
+      if (filterTimer) clearTimeout(filterTimer);
+      filterTimer = setTimeout(function () { stateAll.filter = String(filterEl.value || "").trim(); stateAll.page = 1; render(); }, 180);
+    });
+    table.addEventListener("click", function (ev) {
+      var tr = ev.target.closest("tr[data-code]");
+      if (!tr) return;
+      var code = tr.getAttribute("data-code");
+      if (code && typeof loadKline === "function") void loadKline(code, { auto: false });
+      if (code) window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    card.hidden = false;
+    load();
+  }
+
   function initShell() {
     buildNav();
     createPlaceholderPages();
@@ -3542,6 +3621,19 @@
     return esc(value.slice(0, idx)) + "<mark>" + esc(value.slice(idx, idx + q.length)) + "</mark>" + esc(value.slice(idx + q.length));
   }
 
+  function ensureMarketAll() {
+    if (state.marketAll !== undefined && state.marketAll !== null) return Promise.resolve(state.marketAll);
+    state.marketAll = null;
+    return getJSON(EP.marketAll, { timeoutMs: 25000 }).then(function (r) {
+      var d = (r && r.data) || {};
+      state.marketAll = d.stocks || [];
+      return state.marketAll;
+    }).catch(function () {
+      state.marketAll = [];
+      return [];
+    });
+  }
+
   function initGlobalSearch() {
     var input = $("#stockQuery");
     var btn = $("#stockQueryBtn");
@@ -3604,6 +3696,28 @@
       var q = String(input.value || "").trim();
       if (!q) { close(); return; }
       if (search.timer) { clearTimeout(search.timer); search.timer = 0; }
+      // 本地全市场过滤（5xxx 只，秒回）；无数据时回退服务端
+      var all = state.marketAll;
+      if (all && all.length) {
+        var hits = [];
+        var lower = q.toLowerCase();
+        for (var i = 0; i < all.length && hits.length < 12; i += 1) {
+          var s = all[i];
+          if (!s || !s.symbol) continue;
+          var sym = String(s.symbol);
+          if (sym.indexOf("sz") !== 0 && sym.indexOf("sh") !== 0) continue;
+          var code = sym.slice(2);
+          var name = String(s.name || "");
+          if (code.indexOf(q) >= 0 || name.indexOf(q) >= 0 || code === q) {
+            hits.push({ symbol: code, name: name, initials: "" });
+          }
+        }
+        if (/^\d{6}$/.test(q) && !hits.length) {
+          hits.push({ symbol: q, name: "", initials: "" });
+        }
+        applyItems(hits);
+        return;
+      }
       var reqId = ++search.req;
       search.queryAtReq = q;
       getJSON(EP.search + "?q=" + encodeURIComponent(q) + "&limit=12").then(function (r) {
@@ -3622,9 +3736,10 @@
       search.timer = setTimeout(function () { search.timer = 0; runQuery(); }, 200);
     }
     input.addEventListener("focus", function () {
+      void ensureMarketAll();
       if (String(input.value || "").trim()) { scheduleQuery(); }
     });
-    input.addEventListener("input", scheduleQuery);
+    input.addEventListener("input", function () { void ensureMarketAll(); scheduleQuery(); });
     input.addEventListener("keydown", function (ev) {
       if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
         ev.preventDefault();
@@ -5621,6 +5736,7 @@
     });
     startRealtime();
     initShell();
+    if (IS_CLOUD && typeof createMarketAllPanel === "function") { setTimeout(createMarketAllPanel, 800); }
     if (IS_CLOUD) startDirectQuotePoll();
   }
 
@@ -5672,7 +5788,12 @@
     var url = "https://qt.gtimg.cn/q=" + codes.join(",") + "&_=" + Date.now();
     return fetch(url, { cache: "no-store", credentials: "omit", referrer: "https://gu.qq.com/" })
       .then(function (resp) { return resp.arrayBuffer(); })
-      .then(function (buf) { return parseTencentQuotes(new TextDecoder("gbk").decode(buf)); });
+      .then(function (buf) {
+        var text;
+        try { text = new TextDecoder("gbk").decode(buf); }
+        catch (e) { text = new TextDecoder("utf-8").decode(buf); }
+        return parseTencentQuotes(text);
+      });
   }
 
   function applyDirectQuotes(quotes) {
@@ -5708,9 +5829,11 @@
   }
 
   function startDirectQuotePoll() {
+    if (!directPoll) directPoll = { timer: null };
     if (directPoll.timer) return;
     var tick = function () {
       if (document.hidden) return;
+      try {
       var codes = [];
       document.querySelectorAll(".rt-idx[data-code]").forEach(function (el) {
         var c = el.getAttribute("data-code");
@@ -5724,6 +5847,7 @@
       });
       if (!codes.length) return;
       fetchTencentDirect(codes).then(applyDirectQuotes).catch(function () {});
+      } catch (e) { /* 直连失败静默，页面继续用快照数据 */ }
     };
     tick();
     directPoll.timer = window.setInterval(tick, 3000);
