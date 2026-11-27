@@ -1,0 +1,706 @@
+{
+  "walk_forward": {
+    "accuracy": 0.436364,
+    "n": 5280,
+    "logloss": 1.04336,
+    "brier": 0.639148,
+    "per_class": {
+      "up": {
+        "precision": 0.433384,
+        "recall": 0.515302,
+        "f1": 0.470806,
+        "support": 2222,
+        "predicted": 2642
+      },
+      "flat": {
+        "precision": 0.243902,
+        "recall": 0.013123,
+        "f1": 0.024907,
+        "support": 762,
+        "predicted": 41
+      },
+      "down": {
+        "precision": 0.442434,
+        "recall": 0.500436,
+        "f1": 0.469651,
+        "support": 2296,
+        "predicted": 2597
+      }
+    },
+    "confusion": {
+      "labels": [
+        "up",
+        "flat",
+        "down"
+      ],
+      "matrix": [
+        [
+          1145,
+          12,
+          1065
+        ],
+        [
+          369,
+          10,
+          383
+        ],
+        [
+          1128,
+          19,
+          1149
+        ]
+      ]
+    },
+    "calibration": [
+      {
+        "bucket": "le_0.40",
+        "n": 184,
+        "hit_rate": 0.402174,
+        "avg_confidence": 0.380862
+      },
+      {
+        "bucket": "0.40-0.50",
+        "n": 2028,
+        "hit_rate": 0.435404,
+        "avg_confidence": 0.460663
+      },
+      {
+        "bucket": "0.50-0.60",
+        "n": 2056,
+        "hit_rate": 0.428502,
+        "avg_confidence": 0.543229
+      },
+      {
+        "bucket": "gt_0.60",
+        "n": 1012,
+        "hit_rate": 0.460474,
+        "avg_confidence": 0.662629
+      }
+    ],
+    "win_rate": 0.43787,
+    "win_rate_n": 5239,
+    "wilson95": [
+      0.424486,
+      0.451345
+    ],
+    "win_rate_by_direction": {
+      "long": {
+        "n": 2642,
+        "win": 1145,
+        "win_rate": 0.433384,
+        "wilson95": [
+          0.414598,
+          0.452363
+        ],
+        "avg_net_return": -0.001302
+      },
+      "short": {
+        "n": 2597,
+        "win": 1149,
+        "win_rate": 0.442434,
+        "wilson95": [
+          0.42343,
+          0.461607
+        ],
+        "avg_net_return": -0.002552
+      }
+    },
+    "avg_net_return": -0.001922,
+    "payoff_ratio": 0.890152,
+    "cost": 0.002,
+    "pred_dist": {
+      "up": 2642,
+      "flat": 41,
+      "down": 2597
+    }
+  },
+  "folds": [
+    {
+      "fold": 0,
+      "train_range": [
+        "2024-01-02",
+        "2025-01-13"
+      ],
+      "valid_range": [
+        "2025-01-14",
+        "2025-02-18"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.408333,
+      "win_rate": 0.408333,
+      "win_rate_n": 240,
+      "logloss": 1.044172
+    },
+    {
+      "fold": 1,
+      "train_range": [
+        "2024-01-30",
+        "2025-02-18"
+      ],
+      "valid_range": [
+        "2025-02-19",
+        "2025-03-18"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.45,
+      "win_rate": 0.45,
+      "win_rate_n": 240,
+      "logloss": 0.981055
+    },
+    {
+      "fold": 2,
+      "train_range": [
+        "2024-03-06",
+        "2025-03-18"
+      ],
+      "valid_range": [
+        "2025-03-19",
+        "2025-04-16"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.4625,
+      "win_rate": 0.4625,
+      "win_rate_n": 240,
+      "logloss": 1.002204
+    },
+    {
+      "fold": 3,
+      "train_range": [
+        "2024-04-03",
+        "2025-04-16"
+      ],
+      "valid_range": [
+        "2025-04-17",
+        "2025-05-19"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.395833,
+      "win_rate": 0.395833,
+      "win_rate_n": 240,
+      "logloss": 1.005616
+    },
+    {
+      "fold": 4,
+      "train_range": [
+        "2024-05-08",
+        "2025-05-19"
+      ],
+      "valid_range": [
+        "2025-05-20",
+        "2025-06-17"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.445833,
+      "win_rate": 0.445833,
+      "win_rate_n": 240,
+      "logloss": 1.125693
+    },
+    {
+      "fold": 5,
+      "train_range": [
+        "2024-06-05",
+        "2025-06-17"
+      ],
+      "valid_range": [
+        "2025-06-18",
+        "2025-07-15"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.433333,
+      "win_rate": 0.432773,
+      "win_rate_n": 238,
+      "logloss": 1.048557
+    },
+    {
+      "fold": 6,
+      "train_range": [
+        "2024-07-04",
+        "2025-07-15"
+      ],
+      "valid_range": [
+        "2025-07-16",
+        "2025-08-12"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.445833,
+      "win_rate": 0.44958,
+      "win_rate_n": 238,
+      "logloss": 1.054691
+    },
+    {
+      "fold": 7,
+      "train_range": [
+        "2024-08-01",
+        "2025-08-12"
+      ],
+      "valid_range": [
+        "2025-08-13",
+        "2025-09-09"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.379167,
+      "win_rate": 0.379167,
+      "win_rate_n": 240,
+      "logloss": 1.119908
+    },
+    {
+      "fold": 8,
+      "train_range": [
+        "2024-08-29",
+        "2025-09-09"
+      ],
+      "valid_range": [
+        "2025-09-10",
+        "2025-10-15"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.445833,
+      "win_rate": 0.447699,
+      "win_rate_n": 239,
+      "logloss": 1.034596
+    },
+    {
+      "fold": 9,
+      "train_range": [
+        "2024-09-30",
+        "2025-10-15"
+      ],
+      "valid_range": [
+        "2025-10-16",
+        "2025-11-12"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.479167,
+      "win_rate": 0.476987,
+      "win_rate_n": 239,
+      "logloss": 1.080408
+    },
+    {
+      "fold": 10,
+      "train_range": [
+        "2024-11-04",
+        "2025-11-12"
+      ],
+      "valid_range": [
+        "2025-11-13",
+        "2025-12-10"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.383333,
+      "win_rate": 0.380753,
+      "win_rate_n": 239,
+      "logloss": 1.152516
+    },
+    {
+      "fold": 11,
+      "train_range": [
+        "2024-12-02",
+        "2025-12-10"
+      ],
+      "valid_range": [
+        "2025-12-11",
+        "2026-01-09"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.404167,
+      "win_rate": 0.407563,
+      "win_rate_n": 238,
+      "logloss": 1.081259
+    },
+    {
+      "fold": 12,
+      "train_range": [
+        "2024-12-30",
+        "2026-01-09"
+      ],
+      "valid_range": [
+        "2026-01-12",
+        "2026-02-06"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.429167,
+      "win_rate": 0.433476,
+      "win_rate_n": 233,
+      "logloss": 1.056224
+    },
+    {
+      "fold": 13,
+      "train_range": [
+        "2025-02-05",
+        "2026-02-06"
+      ],
+      "valid_range": [
+        "2026-02-09",
+        "2026-03-16"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.391667,
+      "win_rate": 0.397436,
+      "win_rate_n": 234,
+      "logloss": 1.056064
+    },
+    {
+      "fold": 14,
+      "train_range": [
+        "2025-03-05",
+        "2026-03-16"
+      ],
+      "valid_range": [
+        "2026-03-17",
+        "2026-04-14"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.475,
+      "win_rate": 0.480851,
+      "win_rate_n": 235,
+      "logloss": 0.993085
+    },
+    {
+      "fold": 15,
+      "train_range": [
+        "2025-04-02",
+        "2026-04-14"
+      ],
+      "valid_range": [
+        "2026-04-15",
+        "2026-05-15"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.433333,
+      "win_rate": 0.434043,
+      "win_rate_n": 235,
+      "logloss": 1.075567
+    },
+    {
+      "fold": 16,
+      "train_range": [
+        "2025-05-06",
+        "2026-05-15"
+      ],
+      "valid_range": [
+        "2026-05-18",
+        "2026-06-12"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.429167,
+      "win_rate": 0.428571,
+      "win_rate_n": 238,
+      "logloss": 1.060952
+    },
+    {
+      "fold": 17,
+      "train_range": [
+        "2025-06-04",
+        "2026-06-12"
+      ],
+      "valid_range": [
+        "2026-06-15",
+        "2026-07-13"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.5375,
+      "win_rate": 0.5375,
+      "win_rate_n": 240,
+      "logloss": 0.900663
+    },
+    {
+      "fold": 18,
+      "train_range": [
+        "2025-07-02",
+        "2026-07-13"
+      ],
+      "valid_range": [
+        "2026-07-14",
+        "2026-08-10"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.4375,
+      "win_rate": 0.4375,
+      "win_rate_n": 240,
+      "logloss": 1.00418
+    },
+    {
+      "fold": 19,
+      "train_range": [
+        "2025-07-30",
+        "2026-08-10"
+      ],
+      "valid_range": [
+        "2026-08-11",
+        "2026-09-07"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.445833,
+      "win_rate": 0.45339,
+      "win_rate_n": 236,
+      "logloss": 1.03113
+    },
+    {
+      "fold": 20,
+      "train_range": [
+        "2025-08-27",
+        "2026-09-07"
+      ],
+      "valid_range": [
+        "2026-09-08",
+        "2026-10-13"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.441667,
+      "win_rate": 0.445378,
+      "win_rate_n": 238,
+      "logloss": 1.058454
+    },
+    {
+      "fold": 21,
+      "train_range": [
+        "2025-09-24",
+        "2026-10-13"
+      ],
+      "valid_range": [
+        "2026-10-14",
+        "2026-11-10"
+      ],
+      "n_train": 3000,
+      "n_valid": 240,
+      "accuracy": 0.445833,
+      "win_rate": 0.447699,
+      "win_rate_n": 239,
+      "logloss": 0.986919
+    }
+  ],
+  "feature_importance": [
+    {
+      "name": "bench_ret_5d_lag1",
+      "gain": 3105.219,
+      "gain_share": 0.12192,
+      "split": 528,
+      "group": "市场基准"
+    },
+    {
+      "name": "volatility_20",
+      "gain": 1593.1569,
+      "gain_share": 0.062552,
+      "split": 236,
+      "group": "波动率"
+    },
+    {
+      "name": "lower_shadow",
+      "gain": 1561.7738,
+      "gain_share": 0.06132,
+      "split": 318,
+      "group": "K线形态"
+    },
+    {
+      "name": "turnover_rate",
+      "gain": 1456.5794,
+      "gain_share": 0.057189,
+      "split": 286,
+      "group": "量能"
+    },
+    {
+      "name": "ma_bias_60",
+      "gain": 1454.5572,
+      "gain_share": 0.05711,
+      "split": 292,
+      "group": "均线乖离"
+    },
+    {
+      "name": "gap",
+      "gain": 1307.1431,
+      "gain_share": 0.051322,
+      "split": 275,
+      "group": "K线形态"
+    },
+    {
+      "name": "amplitude",
+      "gain": 1244.1326,
+      "gain_share": 0.048848,
+      "split": 227,
+      "group": "K线形态"
+    },
+    {
+      "name": "excess_ret_5d",
+      "gain": 1235.8088,
+      "gain_share": 0.048521,
+      "split": 255,
+      "group": "超额收益"
+    },
+    {
+      "name": "excess_ret_10d",
+      "gain": 1202.7769,
+      "gain_share": 0.047224,
+      "split": 249,
+      "group": "超额收益"
+    },
+    {
+      "name": "upper_shadow",
+      "gain": 1201.7165,
+      "gain_share": 0.047183,
+      "split": 255,
+      "group": "K线形态"
+    },
+    {
+      "name": "ret_1d",
+      "gain": 1200.1226,
+      "gain_share": 0.04712,
+      "split": 235,
+      "group": "个股动量"
+    },
+    {
+      "name": "volatility_5",
+      "gain": 1171.3841,
+      "gain_share": 0.045992,
+      "split": 259,
+      "group": "波动率"
+    },
+    {
+      "name": "amount_share_ma5",
+      "gain": 1123.6559,
+      "gain_share": 0.044118,
+      "split": 224,
+      "group": "量能"
+    },
+    {
+      "name": "excess_ret_20d",
+      "gain": 1045.3128,
+      "gain_share": 0.041042,
+      "split": 228,
+      "group": "超额收益"
+    },
+    {
+      "name": "amount_share",
+      "gain": 1030.3078,
+      "gain_share": 0.040453,
+      "split": 207,
+      "group": "量能"
+    },
+    {
+      "name": "ret_5d",
+      "gain": 938.6958,
+      "gain_share": 0.036856,
+      "split": 191,
+      "group": "个股动量"
+    },
+    {
+      "name": "ret_20d",
+      "gain": 936.6712,
+      "gain_share": 0.036776,
+      "split": 198,
+      "group": "个股动量"
+    },
+    {
+      "name": "body_ratio",
+      "gain": 931.2012,
+      "gain_share": 0.036562,
+      "split": 199,
+      "group": "K线形态"
+    },
+    {
+      "name": "ma_bias_5",
+      "gain": 889.3468,
+      "gain_share": 0.034918,
+      "split": 188,
+      "group": "均线乖离"
+    },
+    {
+      "name": "ma_bias_20",
+      "gain": 803.5621,
+      "gain_share": 0.03155,
+      "split": 177,
+      "group": "均线乖离"
+    },
+    {
+      "name": "pool_limit_up_count_lag1",
+      "gain": 25.1635,
+      "gain_share": 0.000988,
+      "split": 9,
+      "group": "股票池代理情绪"
+    },
+    {
+      "name": "pool_max_boards_lag1",
+      "gain": 11.0828,
+      "gain_share": 0.000435,
+      "split": 4,
+      "group": "股票池代理情绪"
+    },
+    {
+      "name": "limit_down_count_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "limit_up_count_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "limit_up_ma5_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "max_consecutive_boards_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "broken_rate_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "broken_rate_ma5_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    },
+    {
+      "name": "pool_broken_rate_lag1",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "股票池代理情绪"
+    },
+    {
+      "name": "sentiment_missing",
+      "gain": 0.0,
+      "gain_share": 0.0,
+      "split": 0,
+      "group": "涨跌停情绪"
+    }
+  ],
+  "cost": 0.002
+}
